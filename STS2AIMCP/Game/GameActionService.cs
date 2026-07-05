@@ -3187,9 +3187,12 @@ internal static class GameActionService
         return potion.TargetType switch
         {
             TargetType.AnyEnemy => ResolvePotionEnemyTarget(request, combatState, potion),
-            TargetType.AnyPlayer when GameStateService.PotionRequiresTarget(combatState, potion) => ResolvePotionPlayerTarget(request, combatState, potion),
+            TargetType.AnyPlayer when GameStateService.PotionRequiresTarget(combatState, potion) => ResolvePotionPlayerTarget(request, combatState, potion, allowSelf: true),
+            TargetType.AnyAlly => ResolvePotionPlayerTarget(request, combatState, potion, allowSelf: false),
+            TargetType.AnyPlayer => potion.Owner.Creature,
+            TargetType.Self => potion.Owner.Creature,
             TargetType.TargetedNoCreature => null,
-            _ => potion.Owner.Creature
+            _ => null
         };
     }
 
@@ -3230,7 +3233,11 @@ internal static class GameActionService
         return enemy;
     }
 
-    private static Creature ResolvePotionPlayerTarget(ActionRequest request, CombatState? combatState, PotionModel potion)
+    private static Creature ResolvePotionPlayerTarget(
+        ActionRequest request,
+        CombatState? combatState,
+        PotionModel potion,
+        bool allowSelf)
     {
         if (combatState == null)
         {
@@ -3252,7 +3259,7 @@ internal static class GameActionService
             });
         }
 
-        var playerTargetIndices = GameStateService.GetTargetablePlayerIndices(combatState, potion.Owner, allowSelf: true);
+        var playerTargetIndices = GameStateService.GetTargetablePlayerIndices(combatState, potion.Owner, allowSelf);
         if (!playerTargetIndices.Contains(request.target_index.Value))
         {
             throw new ApiException(409, "invalid_target", "target_index is out of range for combat.players[].", new
