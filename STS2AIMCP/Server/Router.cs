@@ -11,7 +11,7 @@ namespace STS2AIMCP.Server;
 
 internal static class Router
 {
-    private const string ServiceName = "sts2-ai-agent";
+    private const string ServiceName = "sts2-ai-mcp";
     private const string ProtocolVersion = "2026-03-11-v1";
     private const string ModVersion = "0.5.0";
     private const string LogPrefix = "[STS2AIMCP.Router]";

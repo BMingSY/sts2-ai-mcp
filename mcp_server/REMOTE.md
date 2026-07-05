@@ -60,7 +60,7 @@ Configure the remote entry on the MaiBot host with the standard name:
 ```json
 {
   "mcpServers": {
-    "sts2-ai-agent-remote": {
+    "sts2-ai-mcp-remote": {
       "enabled": true,
       "transport": "streamable_http",
       "url": "http://WINDOWS_TAILSCALE_IP:8765/mcp",
@@ -79,8 +79,8 @@ Keep the SubAgent shortcut config simple:
 ```toml
 [sts2]
 enabled = true
-local_server_name = "sts2-ai-agent"
-remote_server_name = "sts2-ai-agent-remote"
+local_server_name = "sts2-ai-mcp"
+remote_server_name = "sts2-ai-mcp-remote"
 ```
 
 That keeps one STS2 skill and lets the plugin prefer local MCP when present, then fall back to Tailscale remote.
