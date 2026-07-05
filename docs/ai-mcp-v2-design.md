@@ -306,8 +306,8 @@ Default behavior for user-facing play:
 - `wait_for_decision` returns log-friendly summary fields.
 - `take_action` accepts an optional `client_note` and appends a compact row to the active run log.
 - Logging is best-effort and non-blocking. A filesystem error must not prevent a legal game action.
-- The MCP server creates one run log per run under `agent_knowledge/run_logs/`, using the existing template when available.
-- Each entry records `decision_id`, selected `action_id`, phase, floor/screen, compact state snapshot, selected label, reason note, and result status.
+- The MCP server creates one public markdown decision log per run under `agent_knowledge/run_logs/`. This log is for review and sharing, so it records the selected `action_id`, the agent-provided note exactly as received, and the result status. MCP must not translate or rewrite the note.
+- The MCP server may also create an internal JSONL log under `agent_knowledge/mcp_logs/` for development diagnostics. That log may include `decision_id`, phase, screen, summary, selected label, source, result status, and other structured fields.
 
 The Mod may expose an action history for diagnostics, but normal review logs should be produced by MCP.
 

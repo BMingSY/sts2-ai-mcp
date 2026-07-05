@@ -16,7 +16,6 @@ from fastmcp import Client
 
 
 REPO = Path(__file__).resolve().parents[1]
-LOG_DIR = REPO / "agent_knowledge" / "run_logs"
 DEFAULT_MCP_URL = os.environ.get("STS2_MCP_URL", "http://127.0.0.1:8765/mcp")
 
 
@@ -81,26 +80,30 @@ class ManualDriver:
         goal: str,
         interface: str,
     ) -> None:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
         env_log_path = os.environ.get("STS2_RUN_LOG_PATH")
         self.log_path = (
             log_path
             if log_path is not None
             else Path(env_log_path)
             if env_log_path
-            else LOG_DIR / (datetime.now().strftime("%Y%m%d-%H%M") + "_manual_mcp_v2_unknown.md")
+            else None
         )
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.log_path is not None:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.title = title
         self.character = character
         self.ascension = ascension
         self.goal = goal
         self.interface = interface
+        self.public_log_path: str | None = None
+        self.internal_mcp_log_path: str | None = None
         self.last_decision: dict[str, Any] | None = None
         self.last_raw: dict[str, Any] | None = None
         self.step = 0
 
     def init_log(self) -> None:
+        if self.log_path is None:
+            return
         if self.log_path.exists() and self.log_path.stat().st_size > 0:
             self.step = self._read_last_step()
             return
@@ -124,6 +127,8 @@ class ManualDriver:
         )
 
     def _read_last_step(self) -> int:
+        if self.log_path is None:
+            return 0
         last_step = 0
         for line in self.log_path.read_text(encoding="utf-8").splitlines():
             match = re.match(r"^\|\s*(\d+)\s*\|", line)
@@ -277,9 +282,27 @@ class ManualDriver:
                     json.dumps(preview, ensure_ascii=False)[:1400],
                     flush=True,
                 )
-        print("log_path:", self.log_path, flush=True)
+        if self.public_log_path:
+            print("public_log_path:", self.public_log_path, flush=True)
+            if self.internal_mcp_log_path:
+                print("internal_mcp_log_path:", self.internal_mcp_log_path, flush=True)
+        elif self.log_path is not None:
+            print("local_log_path:", self.log_path, flush=True)
+        else:
+            print("public_log_path: will be returned by take_action logging", flush=True)
 
     def append_log(self, action_id: str, note: str, result: dict[str, Any]) -> None:
+        logging_result = result.get("logging")
+        if isinstance(logging_result, dict) and logging_result.get("path"):
+            self.public_log_path = str(logging_result["path"])
+            print("PUBLIC_LOG_PATH:", self.public_log_path, flush=True)
+            if logging_result.get("mcp_log_path"):
+                self.internal_mcp_log_path = str(logging_result["mcp_log_path"])
+                print("INTERNAL_MCP_LOG_PATH:", self.internal_mcp_log_path, flush=True)
+
+        if self.log_path is None:
+            return
+
         self.step += 1
         decision = self.last_decision or {}
         summary = decision.get("summary") or {}
@@ -294,6 +317,9 @@ class ManualDriver:
             handle.write(row)
 
     def finish_log(self, text: str) -> None:
+        if self.log_path is None:
+            print("FINISH_NOT_WRITTEN_LOCALLY: MCP 自动日志没有最终结果字段；请用 note 记录最终结果。", flush=True)
+            return
         content = self.log_path.read_text(encoding="utf-8")
         content = content.replace("- 最终结果: 进行中。", f"- 最终结果: {text}")
         self.log_path.write_text(content, encoding="utf-8")
@@ -301,10 +327,10 @@ class ManualDriver:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Interactive STS2 ai_safe_v2 MCP driver with Chinese markdown decision logging."
+        description="Interactive STS2 ai_safe_v2 MCP driver. MCP take_action writes the public decision log."
     )
     parser.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help="Network MCP URL.")
-    parser.add_argument("--log-path", type=Path, default=None, help="Markdown decision log path.")
+    parser.add_argument("--log-path", type=Path, default=None, help="Optional extra local markdown log path. MCP take_action logs automatically by default.")
     parser.add_argument("--title", default="STS2 MCP v2 中文决策日志", help="Markdown log title.")
     parser.add_argument("--character", default="未知角色", help="Character/run label written to the log header.")
     parser.add_argument("--ascension", default="", help="Ascension label written to the log header, for example A0.")
@@ -417,9 +443,18 @@ async def main() -> None:
                             "note": note,
                         },
                     )
-                    print("NOTE_RESULT:", json.dumps(_tool_data(result), ensure_ascii=False)[:2500], flush=True)
-                    with driver.log_path.open("a", encoding="utf-8") as handle:
-                        handle.write(f"\n备注: {note}\n")
+                    data = _tool_data(result)
+                    print("NOTE_RESULT:", json.dumps(data, ensure_ascii=False)[:2500], flush=True)
+                    logging_result = data if data.get("path") else data.get("logging")
+                    if isinstance(logging_result, dict) and logging_result.get("path"):
+                        driver.public_log_path = str(logging_result["path"])
+                        print("PUBLIC_LOG_PATH:", driver.public_log_path, flush=True)
+                        if logging_result.get("mcp_log_path"):
+                            driver.internal_mcp_log_path = str(logging_result["mcp_log_path"])
+                            print("INTERNAL_MCP_LOG_PATH:", driver.internal_mcp_log_path, flush=True)
+                    if driver.log_path is not None:
+                        with driver.log_path.open("a", encoding="utf-8") as handle:
+                            handle.write(f"\n备注: {note}\n")
                 elif line.startswith("finish "):
                     driver.finish_log(line[7:].strip())
                     print("FINISHED_LOG", driver.log_path, flush=True)

@@ -101,14 +101,46 @@ class V2ProfileTests(unittest.TestCase):
                     client_note="forced by test",
                 )
                 with open(result["logging"]["path"], "r", encoding="utf-8") as f:
-                    row = json.loads(f.readline())
+                    content = f.read()
+                with open(result["logging"]["mcp_log_path"], "r", encoding="utf-8") as f:
+                    mcp_row = json.loads(f.readline())
 
         self.assertEqual(result["status"], "completed")
         self.assertTrue(result["logging"]["ok"])
-        self.assertEqual(row["decision_id"], "run:f1:combat:t1:abc123")
-        self.assertEqual(row["action_id"], "combat:end_turn")
-        self.assertEqual(row["selected_label"], "End turn")
-        self.assertEqual(row["client_note"], "forced by test")
+        self.assertTrue(result["logging"]["path"].endswith("run123.md"))
+        self.assertTrue(result["logging"]["mcp_log_path"].endswith("run123.jsonl"))
+        self.assertIn("# STS2 Decision Log", content)
+        self.assertIn("MCP does not translate or rewrite it", content)
+        self.assertIn("| 1 | `combat:end_turn` | forced by test | completed |", content)
+        self.assertNotIn("HP 50/70", content)
+        self.assertNotIn("End turn", content)
+        self.assertEqual(mcp_row["decision_id"], "run:f1:combat:t1:abc123")
+        self.assertEqual(mcp_row["action_id"], "combat:end_turn")
+        self.assertEqual(mcp_row["selected_label"], "End turn")
+        self.assertEqual(mcp_row["client_note"], "forced by test")
+        self.assertEqual(mcp_row["summary"], {"floor": 1, "current_hp": 50, "max_hp": 70})
+
+    def test_take_action_avoids_mixing_old_decision_log_format(self) -> None:
+        client = DummyV2Client()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_logs = os.path.join(tmpdir, "run_logs")
+            os.makedirs(run_logs)
+            with open(os.path.join(run_logs, "run123.md"), "w", encoding="utf-8") as f:
+                f.write("| Step | Floor/Screen | State Snapshot | Decision | Reason | Result |\n")
+
+            with patch.dict(os.environ, {"STS2_AGENT_KNOWLEDGE_DIR": tmpdir}):
+                server = create_server(client=client, tool_profile="ai_safe_v2")
+                get_current = asyncio.run(server.get_tool("get_current_decision"))
+                take_action = asyncio.run(server.get_tool("take_action"))
+
+                get_current.fn()
+                result = take_action.fn(
+                    decision_id="run:f1:combat:t1:abc123",
+                    action_id="combat:end_turn",
+                    client_note="测试旧格式隔离",
+                )
+
+        self.assertTrue(result["logging"]["path"].endswith("run123.decision.md"))
 
     def test_lookup_game_data_filters_fields(self) -> None:
         server = create_server(client=DummyV2Client(), tool_profile="ai_safe_v2")

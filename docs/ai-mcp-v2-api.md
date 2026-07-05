@@ -440,8 +440,9 @@ The v2 HTTP API accepts `client_note` on `act`, but persistent review logs shoul
 
 Recommended MCP behavior:
 
-- Create or reuse one file under `agent_knowledge/run_logs/` per run.
-- Append a row after each `take_action` call with `decision_id`, `action_id`, phase, screen/floor, state summary, selected label, `client_note`, and result status.
+- Create or reuse one public markdown decision log under `agent_knowledge/run_logs/` per run.
+- Append a compact table row after each `take_action` call with `action_id`, the `client_note` exactly as received, and result status. Do not translate or rewrite agent-provided text.
+- Optionally create an internal JSONL diagnostic log under `agent_knowledge/mcp_logs/` with full structured decision/action metadata for development and debugging.
 - Do not block gameplay on logging failures. Return the game action result and include a non-fatal logging warning if needed.
 - Add a future MCP helper such as `append_decision_note` only if automatic `take_action` logging is not enough.
 

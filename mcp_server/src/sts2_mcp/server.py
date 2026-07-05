@@ -347,14 +347,72 @@ def _sanitize_log_part(value: str | None, fallback: str) -> str:
     return cleaned or fallback
 
 
-def _run_logs_dir() -> Path:
+def _knowledge_root() -> Path:
     configured = os.getenv("STS2_AGENT_KNOWLEDGE_DIR", "").strip()
-    root = Path(configured).expanduser().resolve() if configured else _repo_root() / "agent_knowledge"
-    return root / "run_logs"
+    return Path(configured).expanduser().resolve() if configured else _repo_root() / "agent_knowledge"
+
+
+def _run_logs_dir() -> Path:
+    return _knowledge_root() / "run_logs"
+
+
+def _mcp_logs_dir() -> Path:
+    return _knowledge_root() / "mcp_logs"
 
 
 def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _md_cell(value: Any) -> str:
+    return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ")
+
+
+def _log_step_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    last_step = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"^\|\s*(\d+)\s*\|", line)
+        if match:
+            last_step = max(last_step, int(match.group(1)))
+    return last_step
+
+
+def _decision_log_header(decision: dict[str, Any] | None) -> str:
+    summary = decision.get("summary") if isinstance(decision, dict) else None
+    run_id = decision.get("run_id") if isinstance(decision, dict) else None
+    character = summary.get("character_id") if isinstance(summary, dict) else None
+    ascension = summary.get("ascension") if isinstance(summary, dict) else None
+    character_label = str(character or "未知角色")
+    if ascension is not None:
+        character_label = f"{character_label} / A{ascension}"
+
+    return "\n".join(
+        [
+            "# STS2 Decision Log",
+            "",
+            f"- Started UTC: {_utc_timestamp()}",
+            f"- Run ID: {run_id or 'unknown'}",
+            f"- Character/Ascension: {character_label}",
+            "- Interface: MCP `ai_safe_v2` / automatic `take_action` logging.",
+            "- Note: this public log preserves agent-provided `client_note` / `append_decision_note` text as-is. MCP does not translate or rewrite it.",
+            "- Result: in progress.",
+            "",
+            "| Step | Action | Agent note | Result |",
+            "| --- | --- | --- | --- |",
+            "",
+        ]
+    )
+
+
+def _resolve_public_log_path(path: Path) -> Path:
+    if not path.exists() or path.stat().st_size == 0:
+        return path
+    content = path.read_text(encoding="utf-8")
+    if "| Step | Action | Agent note | Result |" in content:
+        return path
+    return path.with_name(f"{path.stem}.decision{path.suffix}")
 
 
 def _find_choice(decision: dict[str, Any] | None, action_id: str) -> dict[str, Any] | None:
@@ -379,34 +437,49 @@ def _append_decision_log(
 ) -> dict[str, Any]:
     try:
         log_dir = _run_logs_dir()
+        mcp_log_dir = _mcp_logs_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
+        mcp_log_dir.mkdir(parents=True, exist_ok=True)
 
         run_id = None
         if isinstance(decision, dict):
             run_id = decision.get("run_id")
-        filename = f"{_sanitize_log_part(str(run_id) if run_id else None, 'run_unknown')}.jsonl"
-        path = log_dir / filename
+        log_name = _sanitize_log_part(str(run_id) if run_id else None, "run_unknown")
+        path = _resolve_public_log_path(log_dir / f"{log_name}.md")
+        mcp_log_path = mcp_log_dir / f"{log_name}.jsonl"
         choice = _find_choice(decision, action_id)
-        summary = decision.get("summary") if isinstance(decision, dict) else None
 
+        if not path.exists() or path.stat().st_size == 0:
+            path.write_text(_decision_log_header(decision), encoding="utf-8")
+
+        step = _log_step_count(path) + 1
+        reason = note if note is not None else client_note
+        status = result.get("status") if isinstance(result, dict) else ("note" if note else "")
+        row = f"| {step} | {_md_cell(f'`{action_id}`' if action_id else 'note')} | {_md_cell(reason)} | {_md_cell(status)} |\n"
+
+        with path.open("a", encoding="utf-8") as f:
+            f.write(row)
+
+        summary = decision.get("summary") if isinstance(decision, dict) else None
         entry = {
             "timestamp_utc": _utc_timestamp(),
             "decision_id": decision.get("decision_id") if isinstance(decision, dict) else None,
+            "run_id": run_id,
             "action_id": action_id,
             "phase": decision.get("phase") if isinstance(decision, dict) else None,
             "screen": decision.get("screen") if isinstance(decision, dict) else None,
             "summary": summary if isinstance(summary, dict) else None,
             "selected_label": choice.get("label") if isinstance(choice, dict) else None,
+            "selected_source": choice.get("source") if isinstance(choice, dict) else None,
             "client_note": client_note,
             "note": note,
             "result_status": result.get("status") if isinstance(result, dict) else None,
             "result_stable": result.get("stable") if isinstance(result, dict) else None,
         }
-
-        with path.open("a", encoding="utf-8") as f:
+        with mcp_log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
 
-        return {"ok": True, "path": str(path)}
+        return {"ok": True, "path": str(path), "mcp_log_path": str(mcp_log_path)}
     except Exception as exc:  # pragma: no cover - best effort logging
         return {"ok": False, "warning": f"{exc.__class__.__name__}: {exc}"}
 
