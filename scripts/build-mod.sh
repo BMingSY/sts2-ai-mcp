@@ -161,14 +161,14 @@ check_godot_version() {
   fi
 
   echo "[build-mod] Detected Godot/MegaDot version: $version_output"
-  if [[ "$version_output" =~ (^|[^0-9])4\\.6([^0-9]|$) && "$allow_godot_version_mismatch" != "1" ]]; then
+  if [[ "$version_output" =~ (^|[^0-9])4\.6([^0-9]|$) && "$allow_godot_version_mismatch" != "1" ]]; then
     echo "[build-mod] Refusing to build PCK with Godot 4.6.x." >&2
     echo "[build-mod] The current STS2 runtime expects Godot/MegaDot 4.5.1-compatible PCKs." >&2
     echo "[build-mod] Pass --allow-godot-version-mismatch only for local compatibility experiments." >&2
     exit 1
   fi
 
-  if [[ ! "$version_output" =~ (^|[^0-9])4\\.5\\.1([^0-9]|$) ]]; then
+  if [[ ! "$version_output" =~ (^|[^0-9])4\.5\.1([^0-9]|$) ]]; then
     echo "[build-mod] WARNING: Expected Godot/MegaDot 4.5.1-compatible packer." >&2
     echo "[build-mod] Current detected version may be untested: $version_output" >&2
   fi
@@ -179,10 +179,12 @@ mod_name="STS2AIAgent"
 mod_project="$repo_root/STS2AIAgent/STS2AIAgent.csproj"
 build_output_dir="$repo_root/STS2AIAgent/bin/$configuration/net9.0"
 staging_dir="$repo_root/build/mods/$mod_name"
-manifest_source="$repo_root/STS2AIAgent/mod_manifest.json"
+pck_manifest_source="$repo_root/STS2AIAgent/mod_manifest.json"
+mod_json_source="$repo_root/STS2AIAgent/$mod_name.json"
 dll_source="$build_output_dir/$mod_name.dll"
 pck_output="$staging_dir/$mod_name.pck"
 dll_target="$staging_dir/$mod_name.dll"
+mod_json_target="$staging_dir/$mod_name.json"
 builder_project_dir="$repo_root/tools/pck_builder"
 builder_script="$builder_project_dir/build_pck.gd"
 
@@ -225,6 +227,17 @@ if [[ -z "$godot_exe" ]]; then
 fi
 
 check_godot_version "$godot_exe"
+
+path_for_godot() {
+  local path="$1"
+
+  if [[ "$godot_exe" == *.exe && -n "${WSL_DISTRO_NAME:-}" ]] && command -v wslpath >/dev/null 2>&1; then
+    wslpath -w "$path"
+    return
+  fi
+
+  printf '%s\n' "$path"
+}
 
 data_dir="$data_dir_input"
 if [[ -z "$data_dir" && -n "$game_root" ]]; then
@@ -283,13 +296,24 @@ fi
 
 cp -f "$dll_source" "$dll_target"
 
-if [[ ! -f "$manifest_source" ]]; then
-  echo "Manifest not found: $manifest_source" >&2
+if [[ ! -f "$pck_manifest_source" ]]; then
+  echo "PCK manifest not found: $pck_manifest_source" >&2
   exit 1
 fi
 
+if [[ ! -f "$mod_json_source" ]]; then
+  echo "Mod JSON manifest not found: $mod_json_source" >&2
+  exit 1
+fi
+
+cp -f "$mod_json_source" "$mod_json_target"
+
 echo "[build-mod] Packing mod_manifest.json into PCK..."
-"$godot_exe" --headless --path "$builder_project_dir" --script "$builder_script" -- "$manifest_source" "$pck_output"
+"$godot_exe" \
+  --headless \
+  --path "$(path_for_godot "$builder_project_dir")" \
+  --script "$(path_for_godot "$builder_script")" \
+  -- "$(path_for_godot "$pck_manifest_source")" "$(path_for_godot "$pck_output")"
 
 if [[ ! -f "$pck_output" ]]; then
   echo "PCK output not found: $pck_output" >&2
@@ -297,13 +321,32 @@ if [[ ! -f "$pck_output" ]]; then
 fi
 
 echo "[build-mod] Preparing game mods directory..."
-cp -f "$dll_target" "$mods_dir/$mod_name.dll"
-cp -f "$pck_output" "$mods_dir/$mod_name.pck"
+installed_mod_dir="$mods_dir/$mod_name"
+mkdir -p "$installed_mod_dir"
+cp -f "$dll_target" "$installed_mod_dir/$mod_name.dll"
+cp -f "$pck_output" "$installed_mod_dir/$mod_name.pck"
+cp -f "$mod_json_target" "$installed_mod_dir/$mod_name.json"
+
+legacy_root_files=()
+for legacy_file in "$mods_dir/$mod_name.dll" "$mods_dir/$mod_name.pck" "$mods_dir/mod_id.json"; do
+  if [[ -e "$legacy_file" ]]; then
+    legacy_root_files+=("$legacy_file")
+  fi
+done
+
+if [[ ${#legacy_root_files[@]} -gt 0 ]]; then
+  echo "[build-mod] WARNING: Legacy root-level mod files were found in the mods directory." >&2
+  echo "[build-mod] Back them up and remove them before testing the folder-based install to avoid duplicate or stale mod loads:" >&2
+  for legacy_file in "${legacy_root_files[@]}"; do
+    echo "[build-mod]   $legacy_file" >&2
+  done
+fi
 
 echo "[build-mod] Done."
 echo "[build-mod] Using data dir: $data_dir"
 echo "[build-mod] Using mods dir: $mods_dir"
 echo "[build-mod] Using Godot: $godot_exe"
 echo "[build-mod] Installed files:"
-echo "  $mods_dir/$mod_name.dll"
-echo "  $mods_dir/$mod_name.pck"
+echo "  $installed_mod_dir/$mod_name.dll"
+echo "  $installed_mod_dir/$mod_name.pck"
+echo "  $installed_mod_dir/$mod_name.json"

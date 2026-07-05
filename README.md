@@ -64,6 +64,28 @@ macOS/Linux:
 
 See [docs/building.md](docs/building.md) for details.
 
+## Steam Workshop
+
+The Workshop item should contain the game-side mod only. The MCP server remains a separate local install from this repository.
+
+Package the Workshop content and SteamCMD VDF:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\scripts\package-workshop.ps1" `
+  -GameRoot "D:\steam\steamapps\common\Slay the Spire 2" `
+  -Configuration Release `
+  -OutputRoot "D:\steam\sts2-ai-mcp-workshop" `
+  -PreviewFile "C:\path\to\workshop-preview.png"
+```
+
+Then upload or update with SteamCMD:
+
+```powershell
+steamcmd +login <steam_user> +workshop_build_item "D:\steam\sts2-ai-mcp-workshop\sts2-ai-mcp-workshop.vdf" +quit
+```
+
+Use `-PublishedFileId <id>` after the first upload to update the same Workshop item. See [docs/workshop.md](docs/workshop.md).
+
 ## Run MCP
 
 Stdio MCP:

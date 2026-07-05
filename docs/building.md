@@ -28,6 +28,8 @@ powershell -ExecutionPolicy Bypass -File ".\scripts\build-mod.ps1" `
 ```
 
 The script copies `STS2AIAgent.dll` and `STS2AIAgent.pck` into the game's `mods` directory.
+It installs them as `mods/STS2AIAgent/STS2AIAgent.dll`, `mods/STS2AIAgent/STS2AIAgent.pck`, and `mods/STS2AIAgent/STS2AIAgent.json`.
+If you previously installed an older root-level build as `mods/STS2AIAgent.dll`, `mods/STS2AIAgent.pck`, and `mods/mod_id.json`, back those files up and remove them before testing the folder-based install.
 
 ## macOS/Linux
 
