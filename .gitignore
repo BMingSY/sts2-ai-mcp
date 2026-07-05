@@ -1,0 +1,42 @@
+# Local runtime state
+agent_knowledge/
+run_logs/
+private_knowledge/
+*.local.md
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+.venv-wsl/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+STS2AIAgent/local.props
+
+# Build artifacts
+build/
+dist/
+*.zip
+*.dll
+*.pdb
+*.pck
+
+# Optional generated game data cache.
+# Keep this private unless its source and license are explicitly reviewed.
+mcp_server/data/eng/
+
+# Editor/OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
