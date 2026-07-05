@@ -1128,40 +1128,24 @@ internal static class GameActionService
             });
         }
 
-        var options = GameStateService.GetDeckSelectionOptions(currentScreen);
-        if (request.option_index < 0 || request.option_index >= options.Count)
+        var isCombatHandSelection = GameStateService.TryGetCombatHandSelectionMetadata(currentScreen, out _, out var combatHandSelection);
+        var selectResult = CardSelectionAdapter.TrySelect(currentScreen, request.option_index.Value);
+        if (!selectResult.Success)
         {
-            throw new ApiException(409, "invalid_target", "option_index is out of range.", new
-            {
-                action = "select_deck_card",
-                option_index = request.option_index,
-                option_count = options.Count
-            });
-        }
-
-        var isCombatHandSelection = GameStateService.TryGetCombatHandSelectionMetadata(currentScreen, out var combatHand, out var combatHandSelection);
-        var selected = options[request.option_index.Value];
-        if (isCombatHandSelection)
-        {
-            if (selected is not NHandCardHolder handHolder)
-            {
-                throw new ApiException(503, "state_unavailable", "Combat hand selection holder is unavailable.", new
+            var isOutOfRange = selectResult.ErrorMessage?.Contains("out of range", StringComparison.OrdinalIgnoreCase) == true;
+            throw new ApiException(
+                selectResult.Retryable ? 503 : 409,
+                isOutOfRange ? "invalid_target" : selectResult.Retryable ? "state_unavailable" : "invalid_action",
+                selectResult.ErrorMessage ?? "Card selection failed.",
+                new
                 {
                     action = "select_deck_card",
-                    screen
-                }, retryable: true);
-            }
-
-            combatHand!.Call(
-                combatHand.CurrentMode == NPlayerHand.Mode.UpgradeSelect
-                    ? NPlayerHand.MethodName.SelectCardInUpgradeMode
-                    : NPlayerHand.MethodName.SelectCardInSimpleMode,
-                handHolder);
-            combatHand.Call(NPlayerHand.MethodName.CheckIfSelectionComplete);
-        }
-        else
-        {
-            selected.EmitSignal(NCardHolder.SignalName.Pressed, selected);
+                    screen,
+                    option_index = request.option_index,
+                    option_count = selectResult.OptionCount,
+                    selection_source = selectResult.Source
+                },
+                retryable: selectResult.Retryable);
         }
 
         var stable = currentScreen switch

@@ -715,7 +715,7 @@ internal static class GameStateService
 
     public static bool CanSelectDeckCard(IScreenContext? currentScreen)
     {
-        return GetDeckSelectionOptions(currentScreen).Count > 0;
+        return GetDeckSelectionCards(currentScreen).Count > 0;
     }
 
     public static bool CanCloseCardsView(IScreenContext? currentScreen)
@@ -1164,77 +1164,19 @@ internal static class GameStateService
             .ToArray();
     }
 
-    public static IReadOnlyList<NCardHolder> GetDeckSelectionOptions(IScreenContext? currentScreen)
+    public static IReadOnlyList<CardModel> GetDeckSelectionCards(IScreenContext? currentScreen)
     {
-        if (currentScreen is NCardsViewScreen)
-        {
-            return Array.Empty<NCardHolder>();
-        }
+        return CardSelectionAdapter.GetCards(currentScreen);
+    }
 
-        if (currentScreen is NCardGridSelectionScreen cardSelectScreen)
-        {
-            return GetVisibleGridCardHolders(cardSelectScreen)
-                .Cast<NCardHolder>()
-                .ToArray();
-        }
-
-        if (currentScreen is NChooseACardSelectionScreen chooseCardScreen)
-        {
-            return GetVisibleGridCardHolders(chooseCardScreen)
-                .Cast<NCardHolder>()
-                .ToArray();
-        }
-
-        if (TryGetCombatHandSelection(currentScreen, out var hand))
-        {
-            return hand!.ActiveHolders
-                .Where(node => GodotObject.IsInstanceValid(node) && node.Visible && node.CardModel != null)
-                .OrderBy(node => node.GetIndex())
-                .Cast<NCardHolder>()
-                .ToArray();
-        }
-
-        if (currentScreen is Node rootNode)
-        {
-            return GetVisibleGridCardHolders(rootNode)
-                .Cast<NCardHolder>()
-                .ToArray();
-        }
-
-        return Array.Empty<NCardHolder>();
+    public static IReadOnlyList<NCardHolder> GetVisibleDeckSelectionOptions(IScreenContext? currentScreen)
+    {
+        return CardSelectionAdapter.GetVisibleOptions(currentScreen);
     }
 
     public static string? GetDeckSelectionPrompt(IScreenContext? currentScreen)
     {
-        if (currentScreen is NCardsViewScreen)
-        {
-            return null;
-        }
-
-        if (currentScreen is NCardGridSelectionScreen cardSelectScreen)
-        {
-            return cardSelectScreen.GetNodeOrNull<MegaRichTextLabel>("%BottomLabel")?.Text;
-        }
-
-        if (currentScreen is NChooseACardSelectionScreen chooseCardScreen)
-        {
-            return SafeReadString(() => chooseCardScreen.GetNodeOrNull<NCommonBanner>("Banner")?.label.Text);
-        }
-
-        if (TryGetCombatHandSelection(currentScreen, out var hand))
-        {
-            return SafeReadString(() => hand!.GetNodeOrNull<MegaRichTextLabel>("%SelectionHeader")?.Text);
-        }
-
-        if (currentScreen is Node rootNode)
-        {
-            return SafeReadString(() =>
-                rootNode.GetNodeOrNull<MegaRichTextLabel>("%BottomLabel")?.Text ??
-                FindDescendants<MegaRichTextLabel>(rootNode)
-                    .FirstOrDefault(label => label.IsVisibleInTree() && !string.IsNullOrWhiteSpace(label.Text))?.Text);
-        }
-
-        return null;
+        return CardSelectionAdapter.GetPrompt(currentScreen);
     }
 
     public static bool TryGetCombatHandSelection(IScreenContext? currentScreen, out NPlayerHand? hand)
@@ -2319,6 +2261,8 @@ internal static class GameStateService
             max = selection.max_select,
             selected = selection.selected_count,
             confirm = selection.can_confirm,
+            source = selection.source,
+            maybe_truncated = selection.maybe_truncated,
             cards = selection.cards.Select(card => BuildAgentChoiceCardPayload(card.index, card.name, card.upgraded, card.energy_cost, card.star_cost, card.costs_x, card.star_costs_x, card.rules_text, card.keywords, card.mods, glossaryTerms)).ToArray()
         };
     }
@@ -3291,36 +3235,23 @@ internal static class GameStateService
 
     private static SelectionPayload? BuildSelectionPayload(IScreenContext? currentScreen)
     {
-        var cards = GetDeckSelectionOptions(currentScreen);
-        if (cards.Count == 0)
+        if (!CardSelectionAdapter.TryCreate(currentScreen, out var selection))
         {
             return null;
         }
 
-        var combatHandSelection = TryGetCombatHandSelectionMetadata(currentScreen, out _, out var metadata)
-            ? metadata
-            : default;
-
         return new SelectionPayload
         {
-            kind = currentScreen switch
-            {
-                NDeckUpgradeSelectScreen => "deck_upgrade_select",
-                NDeckTransformSelectScreen => "deck_transform_select",
-                NDeckEnchantSelectScreen => "deck_enchant_select",
-                NChooseACardSelectionScreen => "choose_card_select",
-                _ when TryGetCombatHandSelection(currentScreen, out var hand) => hand!.CurrentMode == NPlayerHand.Mode.UpgradeSelect
-                    ? "combat_hand_upgrade_select"
-                    : "combat_hand_select",
-                _ => "deck_card_select"
-            },
-            prompt = GetDeckSelectionPrompt(currentScreen) ?? string.Empty,
-            min_select = combatHandSelection.MinSelect,
-            max_select = combatHandSelection.MaxSelect,
-            selected_count = combatHandSelection.SelectedCount,
-            requires_confirmation = combatHandSelection.RequiresConfirmation,
-            can_confirm = combatHandSelection.CanConfirm,
-            cards = cards.Select((holder, index) => BuildSelectionCardPayload(holder.CardModel!, index)).ToArray()
+            kind = selection.Kind,
+            prompt = selection.Prompt ?? string.Empty,
+            min_select = selection.MinSelect,
+            max_select = selection.MaxSelect,
+            selected_count = selection.SelectedCount,
+            requires_confirmation = selection.RequiresConfirmation,
+            can_confirm = selection.CanConfirm,
+            source = selection.Source,
+            maybe_truncated = selection.MaybeTruncated,
+            cards = selection.Cards.Select((card, index) => BuildSelectionCardPayload(card, index)).ToArray()
         };
     }
 
@@ -4103,6 +4034,27 @@ internal static class GameStateService
         {
             return null;
         }
+    }
+
+    private static object? GetReflectedField(object target, string fieldName)
+    {
+        try
+        {
+            for (var type = target.GetType(); type != null; type = type.BaseType)
+            {
+                var field = type.GetField(fieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (field != null)
+                {
+                    return field.GetValue(target);
+                }
+            }
+        }
+        catch
+        {
+            return null;
+        }
+
+        return null;
     }
 
     private static string? GetReflectedStringProperty(object target, string propertyName)
@@ -5300,6 +5252,10 @@ internal sealed class SelectionPayload
     public bool requires_confirmation { get; init; }
 
     public bool can_confirm { get; init; }
+
+    public string source { get; init; } = string.Empty;
+
+    public bool maybe_truncated { get; init; }
 
     public SelectionCardPayload[] cards { get; init; } = Array.Empty<SelectionCardPayload>();
 }
