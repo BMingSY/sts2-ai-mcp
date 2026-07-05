@@ -231,7 +231,7 @@ with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
 PY
 fi
 
-sha256sum "$zip_path" >"$checksum_path"
+(cd "$(dirname "$zip_path")" && sha256sum "$(basename "$zip_path")") >"$checksum_path"
 
 echo "[release] ZIP written:"
 echo "  $zip_path"

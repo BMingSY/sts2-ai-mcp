@@ -196,7 +196,7 @@ if (Test-Path $checksumPath) {
 
 Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $zipPath
 $hash = Get-FileHash -Algorithm SHA256 $zipPath
-Write-Utf8NoBom -Path $checksumPath -Content "$($hash.Hash.ToLowerInvariant())  $zipPath`n"
+Write-Utf8NoBom -Path $checksumPath -Content "$($hash.Hash.ToLowerInvariant())  $(Split-Path -Leaf $zipPath)`n"
 
 Write-Host "[release] ZIP written:"
 Write-Host "  $zipPath"
