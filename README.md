@@ -88,6 +88,18 @@ steamcmd +login <steam_user> +workshop_build_item "D:\steam\sts2-ai-mcp-workshop
 
 Use `-PublishedFileId <id>` after the first upload to update the same Workshop item. See [docs/workshop.md](docs/workshop.md).
 
+## Release ZIP
+
+For GitHub Releases, package a manual-install ZIP:
+
+```bash
+./scripts/package-release.sh \
+  --game-root "/mnt/d/steam/steamapps/common/Slay the Spire 2" \
+  --godot-exe "/mnt/d/steam/steamapps/common/Slay the Spire 2/SlayTheSpire2.exe"
+```
+
+The artifact is written under `dist/release/` and contains only the game-side `STS2AIMCP` mod. See [docs/release.md](docs/release.md).
+
 ## Run MCP
 
 Stdio MCP:
