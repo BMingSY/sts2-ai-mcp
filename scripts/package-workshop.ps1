@@ -118,6 +118,22 @@ function Get-GameVersion {
     return "unknown"
 }
 
+function Get-ModVersion {
+    param([string]$ModJsonPath)
+
+    try {
+        $modJson = Get-Content -Raw $ModJsonPath | ConvertFrom-Json
+        if (-not [string]::IsNullOrWhiteSpace($modJson.version)) {
+            return [string]$modJson.version
+        }
+    }
+    catch {
+        Write-Warning "Could not read mod version from ${ModJsonPath}: $_"
+    }
+
+    return "unknown"
+}
+
 function Convert-Visibility {
     param([string]$InputVisibility)
 
@@ -184,6 +200,7 @@ $dllSource = Join-Path $stagingModDir "$modName.dll"
 $pckSource = Join-Path $stagingModDir "$modName.pck"
 $jsonSource = Join-Path $stagingModDir "$modName.json"
 $gameVersion = Get-GameVersion -ResolvedGameRoot $GameRoot
+$modVersion = Get-ModVersion -ModJsonPath $modJsonSource
 
 if (-not $SkipBuild) {
     $buildScript = Join-Path $scriptRoot "build-mod.ps1"
@@ -245,7 +262,7 @@ The MCP server and agent/client configuration are distributed separately from th
 
 Tested game version: $gameVersion
 Expected Godot/MegaDot version: 4.5.1.m.12
-Mod version: 0.5.0
+Mod version: $modVersion
 
 If Slay the Spire 2 updates and this mod stops loading, use a release tested against your current game version.
 "@

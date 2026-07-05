@@ -13,7 +13,7 @@ internal static class Router
 {
     private const string ServiceName = "sts2-ai-mcp";
     private const string ProtocolVersion = "2026-03-11-v1";
-    private const string ModVersion = "0.5.0";
+    private const string ModVersion = "0.1.0";
     private const string LogPrefix = "[STS2AIMCP.Router]";
 
     private static long _requestCounter;

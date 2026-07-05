@@ -14,7 +14,7 @@ internal static class DecisionWindowService
 
     private const int DecisionVersion = 1;
     private const string DefaultProfile = "ai_safe";
-    private const string ModVersion = "0.5.0";
+    private const string ModVersion = "0.1.0";
 
     private static readonly Regex DealDamageRegex = new(
         @"\bDeal\s+(?<amount>\d+)\s+damage",
