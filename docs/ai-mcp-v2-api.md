@@ -161,7 +161,7 @@ Same `decision` shape as `GET /v2/decision/current`.
 
 ## `POST /v2/decision/act`
 
-Execute one action from a decision window.
+Execute one action from a decision window, then wait for the next stable decision window before returning.
 
 ### Request
 
@@ -178,6 +178,8 @@ Execute one action from a decision window.
 
 ### Success
 
+The normal success path includes `next_decision`. This keeps clients interactive: they choose one action, the game resolves animations/queues/transitions, and the response resumes only once the next AI-safe decision point is ready.
+
 ```json
 {
   "ok": true,
@@ -186,16 +188,20 @@ Execute one action from a decision window.
     "kind": "play_card",
     "status": "completed",
     "stable": true,
-    "message": "Action completed.",
+    "message": "Action completed; next decision is ready.",
     "previous_decision_id": "WJT8A736AV:f33:combat:t6:0007",
-    "next_decision": null
+    "next_decision": {
+      "decision_id": "WJT8A736AV:f33:combat:t6:0008",
+      "phase": "combat",
+      "choices": []
+    }
   }
 }
 ```
 
-### Pending Transition
+### Pending Timeout
 
-If the action was accepted but the next stable decision is not ready:
+If the action was accepted but the next stable decision does not become ready before the server-side action wait timeout:
 
 ```json
 {
@@ -205,33 +211,14 @@ If the action was accepted but the next stable decision is not ready:
     "kind": "end_turn",
     "status": "pending",
     "stable": false,
-    "message": "Action accepted; wait for the next decision.",
+    "message": "Action accepted; next decision did not become ready before timeout. Call wait_for_decision.",
     "previous_decision_id": "WJT8A736AV:f33:combat:t6:0007",
     "next_decision": null
   }
 }
 ```
 
-The client must call `wait_for_decision` after a pending result.
-
-### Optional Inline Next Decision
-
-When the next decision is already stable, the server may include it:
-
-```json
-{
-  "ok": true,
-  "data": {
-    "status": "completed",
-    "stable": true,
-    "next_decision": {
-      "decision_id": "WJT8A736AV:f33:combat:t6:0008",
-      "phase": "combat",
-      "choices": []
-    }
-  }
-}
-```
+The client should call `wait_for_decision` after a pending timeout. Normal play should not see this unless the game remains in a long transition or the Mod cannot classify the next state.
 
 ---
 

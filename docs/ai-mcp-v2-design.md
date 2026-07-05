@@ -68,6 +68,8 @@ WSL / client side
 
 The MCP server should remain a thin wrapper. The Mod is the source of truth for stability, legal choices, and action execution.
 
+`take_action` is interactive by default: after accepting a bound action, the Mod waits for the game to finish resolving and for a new stable decision window before returning. Clients should not need to poll raw state between normal v2 actions; `pending` is reserved for timeout or unclassified transition fallbacks.
+
 ---
 
 ## Decision Window Model
@@ -118,6 +120,7 @@ Minimum combat stability:
 - Combat room mode is active.
 - Hand UI is not in card play animation unless the phase is `combat_selection`.
 - Game action executor has no running action.
+- The combat decision snapshot is unchanged for a short stability window. The snapshot includes hand cards, playable choices, draw/discard/exhaust pile counts, player resources, enemy HP/intents/powers, and incoming risk. This prevents new-combat and new-turn draw animations from exposing half-built hands.
 - Game action queue has no ready action.
 - Hand, energy, stars, turn number, and selected screen signature remain unchanged for a configured delay.
 - Current choices can be rebuilt twice with the same `choice_signature`.
@@ -238,6 +241,8 @@ Default policy: the Mod must reject an action when:
 - The action kind is not allowed in the current profile.
 
 Strict stale-decision rejection is the safest default. If this proves too strict during implementation, only a debug profile should get a recovery mode; normal AI play should call `wait_for_decision` again.
+
+After a valid action is accepted, the Mod should not return a raw intermediate state to the AI-facing client. It should wait for a different stable `decision_id` and include that `next_decision` in the response. If no new stable decision is available before the action wait timeout, return `status=pending`, `stable=false`, and let the client call `wait_for_decision`.
 
 Preferred error:
 

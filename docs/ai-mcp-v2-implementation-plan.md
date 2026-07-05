@@ -71,12 +71,14 @@ Initial scope:
 - Reward `claim_reward`, `choose_reward_card`, `skip_reward_cards`
 - Map `choose_map_node`
 - Event/rest/shop/chest can follow once the registry pattern is proven.
+- After a valid action, wait for a different stable `decision_id` and include it as `next_decision`; return `pending` only after the action wait timeout.
 
 Validation:
 
 - Submitting an old `decision_id` returns `stale_decision`.
 - Submitting an unknown `action_id` returns `invalid_action`.
 - Reordered rewards or changed hand cards invalidate old choices.
+- Normal `decision/act` responses wait through action resolution and include `next_decision`.
 
 ### M3: Relevant Game Data Hydration
 
@@ -240,6 +242,7 @@ Responsibilities:
 - Start game from Steam.
 - Verify `/v2/decision/current` returns unavailable during transitions.
 - Verify `/v2/decision/wait` returns stable combat decisions.
+- Verify `/v2/decision/act` waits through action resolution and includes `next_decision` during normal play.
 - Play a short run using only v2 MCP tools.
 - Record run log entries with `decision_id` and `action_id`.
 - Confirm normal play does not require any human confirmation prompt from v2.

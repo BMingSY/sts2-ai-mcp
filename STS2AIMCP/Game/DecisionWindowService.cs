@@ -15,6 +15,10 @@ internal static class DecisionWindowService
     private const int DecisionVersion = 1;
     private const string DefaultProfile = "ai_safe";
     private const string ModVersion = "0.1.0";
+    private static readonly TimeSpan CombatStableDelay = TimeSpan.FromMilliseconds(500);
+    private static readonly object CombatStabilityGate = new();
+    private static string? _lastCombatStabilitySignature;
+    private static DateTime _lastCombatStabilityChangedUtc = DateTime.MinValue;
 
     private static readonly Regex DealDamageRegex = new(
         @"\bDeal\s+(?<amount>\d+)\s+damage",
@@ -221,8 +225,14 @@ internal static class DecisionWindowService
 
         if (phase == "unknown")
         {
+            ResetCombatStability();
             reason = "state_unstable";
             return false;
+        }
+
+        if (phase != "combat")
+        {
+            ResetCombatStability();
         }
 
         if (phase == "combat" && IsCombatDecisionUnstable(state, choices))
@@ -231,7 +241,7 @@ internal static class DecisionWindowService
             return false;
         }
 
-        if (choices.Count == 0 && phase != "game_over")
+        if (!HasMeaningfulChoices(choices) && phase != "game_over")
         {
             reason = "decision_unavailable";
             return false;
@@ -3546,6 +3556,12 @@ internal static class DecisionWindowService
         var combat = state.combat;
         if (combat == null)
         {
+            ResetCombatStability();
+            return true;
+        }
+
+        if (!HasMeaningfulChoices(choices))
+        {
             return true;
         }
 
@@ -3557,7 +3573,163 @@ internal static class DecisionWindowService
             return true;
         }
 
-        return false;
+        return !IsCombatSnapshotStable(BuildCombatStabilitySignature(state, choices), DateTime.UtcNow);
+    }
+
+    private static bool HasMeaningfulChoices(IReadOnlyList<DecisionChoicePayload> choices)
+    {
+        return choices.Any(choice => !IsPassiveChoice(choice));
+    }
+
+    private static bool IsPassiveChoice(DecisionChoicePayload choice)
+    {
+        return choice.kind is "discard_potion" or "save_and_quit";
+    }
+
+    private static string BuildCombatStabilitySignature(GameStatePayload state, IReadOnlyList<DecisionChoicePayload> choices)
+    {
+        var combat = state.combat;
+        return JsonHelper.Serialize(new
+        {
+            state.run_id,
+            state.screen,
+            floor = state.run?.floor,
+            state.turn,
+            state.available_actions,
+            player = combat == null
+                ? null
+                : new
+                {
+                    combat.player.current_hp,
+                    combat.player.max_hp,
+                    combat.player.block,
+                    combat.player.energy,
+                    combat.player.stars,
+                    powers = combat.player.powers.Select(PowerStabilityProjection).ToArray()
+                },
+            combat?.player_turn_number,
+            combat?.player_turn_phase,
+            combat?.cards_played_this_turn,
+            combat?.attacks_played_this_turn,
+            combat?.skills_played_this_turn,
+            combat?.powers_played_this_turn,
+            hand = combat?.hand.Select(card => new
+            {
+                card.index,
+                card.card_id,
+                card.upgraded,
+                card.energy_cost,
+                card.star_cost,
+                card.playable,
+                card.unplayable_reason,
+                valid_targets = card.valid_target_indices
+            }).ToArray(),
+            piles = combat == null
+                ? null
+                : new
+                {
+                    draw = PileStabilityProjection(combat.piles.draw),
+                    discard = PileStabilityProjection(combat.piles.discard),
+                    exhaust = PileStabilityProjection(combat.piles.exhaust)
+                },
+            enemies = combat?.enemies.Select(enemy => new
+            {
+                enemy.index,
+                enemy.enemy_id,
+                enemy.current_hp,
+                enemy.max_hp,
+                enemy.block,
+                enemy.is_alive,
+                enemy.is_hittable,
+                enemy.intent,
+                enemy.move_id,
+                intents = enemy.intents.Select(intent => new
+                {
+                    intent.index,
+                    intent.intent_type,
+                    intent.label,
+                    intent.damage,
+                    intent.hits,
+                    intent.total_damage,
+                    intent.status_card_count
+                }).ToArray(),
+                powers = enemy.powers.Select(PowerStabilityProjection).ToArray()
+            }).ToArray(),
+            choices = choices.Select(choice => new
+            {
+                choice.action_id,
+                choice.kind,
+                choice.risk_tags,
+                choice.source,
+                choice.preview
+            }).ToArray()
+        });
+    }
+
+    private static object PileStabilityProjection(CombatPilePayload pile)
+    {
+        return new
+        {
+            pile.count,
+            pile.stack_count,
+            pile.shown_stack_count,
+            pile.truncated,
+            pile.omitted_stack_count,
+            pile.attack_count,
+            pile.skill_count,
+            pile.power_count,
+            pile.status_count,
+            pile.curse_count,
+            pile.non_attack_count,
+            pile.block_card_count,
+            pile.defensive_out_count,
+            pile.non_attack_defensive_out_count,
+            pile.skill_defensive_out_count,
+            stacks = pile.stacks.Select(stack => new
+            {
+                stack.card_id,
+                stack.upgraded,
+                stack.card_type,
+                stack.energy_cost,
+                stack.star_cost,
+                stack.count
+            }).ToArray()
+        };
+    }
+
+    private static object PowerStabilityProjection(CombatPowerPayload power)
+    {
+        return new
+        {
+            power.index,
+            power.power_id,
+            power.amount,
+            power.is_debuff
+        };
+    }
+
+    private static bool IsCombatSnapshotStable(string signature, DateTime nowUtc)
+    {
+        lock (CombatStabilityGate)
+        {
+            if (!string.Equals(_lastCombatStabilitySignature, signature, StringComparison.Ordinal))
+            {
+                _lastCombatStabilitySignature = signature;
+                _lastCombatStabilityChangedUtc = nowUtc;
+                return false;
+            }
+
+            return nowUtc - _lastCombatStabilityChangedUtc >= CombatStableDelay;
+        }
+    }
+
+    private static void ResetCombatStability()
+    {
+        lock (CombatStabilityGate)
+        {
+            _lastCombatStabilitySignature = null;
+            _lastCombatStabilityChangedUtc = DateTime.MinValue;
+        }
     }
 
     private static string? GetString(Dictionary<string, object?> source, string key)
