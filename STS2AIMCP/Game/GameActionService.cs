@@ -43,9 +43,9 @@ using MegaCrit.Sts2.Core.Multiplayer.Game.Lobby;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Timeline;
-using STS2AIAgent.Server;
+using STS2AIMCP.Server;
 
-namespace STS2AIAgent.Game;
+namespace STS2AIMCP.Game;
 
 internal static class GameActionService
 {
@@ -3910,12 +3910,12 @@ internal static class GameActionService
             var success = await task;
             if (!success)
             {
-                Log.Warn($"[STS2AIAgent] Background action {actionName} returned false.");
+                Log.Warn($"[STS2AIMCP] Background action {actionName} returned false.");
             }
         }
         catch (Exception ex)
         {
-            Log.Error($"[STS2AIAgent] Background action {actionName} failed: {ex}");
+            Log.Error($"[STS2AIMCP] Background action {actionName} failed: {ex}");
         }
     }
 

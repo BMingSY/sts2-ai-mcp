@@ -1,5 +1,5 @@
 {
-  "pck_name": "STS2AIAgent",
+  "pck_name": "STS2AIMCP",
   "name": "STS2 AI MCP",
   "author": "BMingSY",
   "description": "Local HTTP API bridge for Slay the Spire 2 AI and MCP clients.",

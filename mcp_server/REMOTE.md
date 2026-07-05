@@ -4,7 +4,7 @@ This wrapper lets a remote host reach the local Windows STS2 game through Tailsc
 
 ## Topology
 
-- Windows game machine: run the game, the `STS2AIAgent` mod, and the network wrapper from this repo.
+- Windows game machine: run the game, the `STS2AIMCP` mod, and the network wrapper from this repo.
 - Remote MaiBot host: connect to the wrapper over Tailscale with a normal HTTP MCP entry.
 - SubAgent: keep one `play_sts2` skill and let `mcp_server_candidates` prefer local first and remote second.
 

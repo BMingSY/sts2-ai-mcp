@@ -1,5 +1,5 @@
 {
-  "id": "STS2AIAgent",
+  "id": "STS2AIMCP",
   "name": "STS2 AI MCP",
   "author": "BMingSY",
   "description": "Local HTTP API bridge for Slay the Spire 2 AI and MCP clients.",

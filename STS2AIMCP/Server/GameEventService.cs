@@ -1,12 +1,12 @@
 using System.Threading.Channels;
 using MegaCrit.Sts2.Core.Logging;
-using STS2AIAgent.Game;
+using STS2AIMCP.Game;
 
-namespace STS2AIAgent.Server;
+namespace STS2AIMCP.Server;
 
 internal sealed class GameEventService
 {
-    private const string LogPrefix = "[STS2AIAgent.GameEventService]";
+    private const string LogPrefix = "[STS2AIMCP.GameEventService]";
     private const int DefaultPollIntervalMs = 120;
     private const int SubscriberQueueCapacity = 256;
 

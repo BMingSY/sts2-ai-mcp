@@ -19,7 +19,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $scriptRoot = $PSScriptRoot
-$modName = "STS2AIAgent"
+$modName = "STS2AIMCP"
 
 function Resolve-ProjectRoot {
     param([string]$InputRoot)
@@ -179,7 +179,7 @@ $contentRoot = Join-Path $OutputRoot "content"
 $itemModDir = Join-Path $contentRoot $modName
 $vdfPath = Join-Path $OutputRoot "sts2-ai-mcp-workshop.vdf"
 $stagingModDir = Join-Path $ProjectRoot "build/mods/$modName"
-$modJsonSource = Join-Path $ProjectRoot "STS2AIAgent/$modName.json"
+$modJsonSource = Join-Path $ProjectRoot "STS2AIMCP/$modName.json"
 $dllSource = Join-Path $stagingModDir "$modName.dll"
 $pckSource = Join-Path $stagingModDir "$modName.pck"
 $jsonSource = Join-Path $stagingModDir "$modName.json"
@@ -257,7 +257,7 @@ if ([string]::IsNullOrWhiteSpace($Description)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($ChangeNote)) {
-    $ChangeNote = "Packaged STS2AIAgent mod artifacts for game version $gameVersion."
+    $ChangeNote = "Packaged STS2AIMCP mod artifacts for game version $gameVersion."
 }
 
 $visibilityValue = Convert-Visibility -InputVisibility $Visibility

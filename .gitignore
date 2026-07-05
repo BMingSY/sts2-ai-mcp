@@ -21,7 +21,7 @@ bin/
 obj/
 *.user
 *.suo
-STS2AIAgent/local.props
+STS2AIMCP/local.props
 
 # Build artifacts
 build/

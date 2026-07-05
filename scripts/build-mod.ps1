@@ -145,13 +145,14 @@ function Test-GodotVersion {
 
 Test-GodotVersion -Executable $GodotExe -AllowMismatch:$AllowGodotVersionMismatch.IsPresent
 
-$modName = "STS2AIAgent"
-$modProject = Join-Path $ProjectRoot "STS2AIAgent/STS2AIAgent.csproj"
-$buildOutputDir = Join-Path $ProjectRoot "STS2AIAgent/bin/$Configuration/net9.0"
+$modName = "STS2AIMCP"
+$legacyModName = "STS2AIAgent"
+$modProject = Join-Path $ProjectRoot "STS2AIMCP/STS2AIMCP.csproj"
+$buildOutputDir = Join-Path $ProjectRoot "STS2AIMCP/bin/$Configuration/net9.0"
 $stagingDir = Join-Path $ProjectRoot "build/mods/$modName"
 $installedModDir = Join-Path $ModsDir $modName
-$pckManifestSource = Join-Path $ProjectRoot "STS2AIAgent/mod_manifest.json"
-$modJsonSource = Join-Path $ProjectRoot "STS2AIAgent/$modName.json"
+$pckManifestSource = Join-Path $ProjectRoot "STS2AIMCP/mod_manifest.json"
+$modJsonSource = Join-Path $ProjectRoot "STS2AIMCP/$modName.json"
 $dllSource = Join-Path $buildOutputDir "$modName.dll"
 $pckOutput = Join-Path $stagingDir "$modName.pck"
 $dllTarget = Join-Path $stagingDir "$modName.dll"
@@ -201,13 +202,22 @@ Copy-Item -Force $modJsonTarget (Join-Path $installedModDir "$modName.json")
 $legacyRootFiles = @(
     (Join-Path $ModsDir "$modName.dll"),
     (Join-Path $ModsDir "$modName.pck"),
+    (Join-Path $ModsDir "$legacyModName.dll"),
+    (Join-Path $ModsDir "$legacyModName.pck"),
     (Join-Path $ModsDir "mod_id.json")
 ) | Where-Object { Test-Path $_ }
 
-if ($legacyRootFiles.Count -gt 0) {
-    Write-Warning "Legacy root-level mod files were found in the mods directory. Back them up and remove them before testing the folder-based install to avoid duplicate or stale mod loads:"
+$legacyFolders = @(
+    (Join-Path $ModsDir $legacyModName)
+) | Where-Object { Test-Path $_ }
+
+if ($legacyRootFiles.Count -gt 0 -or $legacyFolders.Count -gt 0) {
+    Write-Warning "Legacy STS2AIAgent mod files were found in the mods directory. Back them up and remove them before testing STS2AIMCP to avoid duplicate or stale mod loads:"
     foreach ($legacyFile in $legacyRootFiles) {
         Write-Warning "  $legacyFile"
+    }
+    foreach ($legacyFolder in $legacyFolders) {
+        Write-Warning "  $legacyFolder"
     }
 }
 

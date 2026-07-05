@@ -46,7 +46,7 @@ v2 should make the safe path the default path.
 
 ```text
 Windows game process
-  STS2AIAgent Mod
+  STS2AIMCP Mod
     v1 services remain available for debug
     DecisionWindowService
       observes game state, queues, UI screens, and transition stability

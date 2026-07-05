@@ -47,7 +47,7 @@ using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Timeline;
 using MegaCrit.Sts2.addons.mega_text;
 
-namespace STS2AIAgent.Game;
+namespace STS2AIMCP.Game;
 
 internal static class GameStateService
 {
@@ -631,7 +631,7 @@ internal static class GameStateService
         var screen = ResolveNonModalScreen(currentScreen);
         if (screen == "UNKNOWN" && currentScreen != null)
         {
-            Log.Warn($"[STS2AIAgent] Unhandled screen type: {currentScreen.GetType().FullName}");
+            Log.Warn($"[STS2AIMCP] Unhandled screen type: {currentScreen.GetType().FullName}");
         }
 
         return screen;
@@ -3453,7 +3453,7 @@ internal static class GameStateService
         }
         catch (Exception ex)
         {
-            Log.Warn($"[STS2AIAgent] Failed to build event payload on screen {currentScreen.GetType().FullName}: {ex}");
+            Log.Warn($"[STS2AIMCP] Failed to build event payload on screen {currentScreen.GetType().FullName}: {ex}");
             return null;
         }
     }

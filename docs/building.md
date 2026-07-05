@@ -10,7 +10,7 @@
 
 ## Important Engine Constraint
 
-The current game runtime is expected to be Godot/MegaDot `4.5.1.m.12`. Do not build `STS2AIAgent.pck` with Godot `4.6.x`.
+The current game runtime is expected to be Godot/MegaDot `4.5.1.m.12`. Do not build `STS2AIMCP.pck` with Godot `4.6.x`.
 
 When possible, use the game-bundled executable/runtime as the packer. If you use a standalone Godot binary, verify its version first:
 
@@ -27,9 +27,9 @@ powershell -ExecutionPolicy Bypass -File ".\scripts\build-mod.ps1" `
   -GodotExe "D:\steam\steamapps\common\Slay the Spire 2\SlayTheSpire2.exe"
 ```
 
-The script copies `STS2AIAgent.dll` and `STS2AIAgent.pck` into the game's `mods` directory.
-It installs them as `mods/STS2AIAgent/STS2AIAgent.dll`, `mods/STS2AIAgent/STS2AIAgent.pck`, and `mods/STS2AIAgent/STS2AIAgent.json`.
-If you previously installed an older root-level build as `mods/STS2AIAgent.dll`, `mods/STS2AIAgent.pck`, and `mods/mod_id.json`, back those files up and remove them before testing the folder-based install.
+The script copies `STS2AIMCP.dll` and `STS2AIMCP.pck` into the game's `mods` directory.
+It installs them as `mods/STS2AIMCP/STS2AIMCP.dll`, `mods/STS2AIMCP/STS2AIMCP.pck`, and `mods/STS2AIMCP/STS2AIMCP.json`.
+If you previously installed the older fork as `mods/STS2AIAgent/`, `mods/STS2AIAgent.dll`, `mods/STS2AIAgent.pck`, or `mods/mod_id.json`, back those files up and remove them before testing `STS2AIMCP`.
 
 ## macOS/Linux
 
@@ -65,4 +65,4 @@ Do not commit machine-specific paths. Use:
 - `GODOT_BIN`
 - `STS2_API_BASE_URL`
 
-`STS2AIAgent/local.props` is ignored by git; use it only for local MSBuild path overrides.
+`STS2AIMCP/local.props` is ignored by git; use it only for local MSBuild path overrides.

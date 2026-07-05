@@ -6,7 +6,7 @@ This repository is the v2-focused successor to the older STS2-Agent fork. The go
 
 ## What Is Included
 
-- `STS2AIAgent/`: the in-game mod HTTP API.
+- `STS2AIMCP/`: the in-game mod HTTP API.
 - `mcp_server/`: FastMCP wrapper with `ai_safe_v2` as the default profile.
 - `scripts/`: build and MCP startup helpers.
 - `docs/`: v2 protocol, compatibility, and build notes.
@@ -38,7 +38,7 @@ Slay the Spire 2 is still changing, so a mod build may not remain compatible acr
 Known engine constraint:
 
 - Current target: Godot/MegaDot `4.5.1.m.12`.
-- Do not pack `STS2AIAgent.pck` with Godot `4.6.x`; the game may reject it.
+- Do not pack `STS2AIMCP.pck` with Godot `4.6.x`; the game may reject it.
 
 See [docs/compatibility.md](docs/compatibility.md) for the compatibility policy.
 
@@ -63,6 +63,8 @@ macOS/Linux:
 ```
 
 See [docs/building.md](docs/building.md) for details.
+
+If you are migrating from the older fork, remove or disable old `STS2AIAgent` files under the game's `mods` directory before testing `STS2AIMCP`.
 
 ## Steam Workshop
 
@@ -103,7 +105,7 @@ HTTP MCP:
 ## Validation
 
 ```bash
-dotnet build STS2AIAgent/STS2AIAgent.csproj -c Release \
+dotnet build STS2AIMCP/STS2AIMCP.csproj -c Release \
   "/p:Sts2DataDir=/path/to/Slay the Spire 2/data_sts2_windows_x86_64"
 cd mcp_server
 .venv/bin/python -m pytest -q

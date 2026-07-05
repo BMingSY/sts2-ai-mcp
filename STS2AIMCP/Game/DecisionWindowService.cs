@@ -4,9 +4,9 @@ using System.Text.RegularExpressions;
 using MegaCrit.Sts2.Core.Debug;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Models;
-using STS2AIAgent.Server;
+using STS2AIMCP.Server;
 
-namespace STS2AIAgent.Game;
+namespace STS2AIMCP.Game;
 
 internal static class DecisionWindowService
 {

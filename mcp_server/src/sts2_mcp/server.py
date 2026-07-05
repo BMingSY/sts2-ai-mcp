@@ -474,7 +474,7 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
     knowledge = Sts2KnowledgeBase()
     handoff = Sts2HandoffService(knowledge)
     profile = _normalize_tool_profile(tool_profile)
-    mcp = FastMCP("STS2 AI Agent")
+    mcp = FastMCP("STS2 AI MCP")
     decision_cache: dict[str, dict[str, Any]] = {}
 
     def _agent_state() -> dict[str, Any]:
@@ -587,7 +587,7 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
 
     @mcp.tool
     def health_check() -> dict[str, Any]:
-        """Check whether the STS2 AI Agent Mod is loaded and reachable."""
+        """Check whether the STS2 AI MCP Mod is loaded and reachable."""
         health = sts2.get_health()
         return {
             **health,

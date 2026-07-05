@@ -5,16 +5,16 @@ using System.Threading;
 using System.IO;
 using MegaCrit.Sts2.Core.Debug;
 using MegaCrit.Sts2.Core.Logging;
-using STS2AIAgent.Game;
+using STS2AIMCP.Game;
 
-namespace STS2AIAgent.Server;
+namespace STS2AIMCP.Server;
 
 internal static class Router
 {
     private const string ServiceName = "sts2-ai-agent";
     private const string ProtocolVersion = "2026-03-11-v1";
     private const string ModVersion = "0.5.0";
-    private const string LogPrefix = "[STS2AIAgent.Router]";
+    private const string LogPrefix = "[STS2AIMCP.Router]";
 
     private static long _requestCounter;
 

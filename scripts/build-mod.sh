@@ -175,12 +175,13 @@ check_godot_version() {
 }
 
 repo_root="$(resolve_repo_root "$repo_root_input")"
-mod_name="STS2AIAgent"
-mod_project="$repo_root/STS2AIAgent/STS2AIAgent.csproj"
-build_output_dir="$repo_root/STS2AIAgent/bin/$configuration/net9.0"
+mod_name="STS2AIMCP"
+legacy_mod_name="STS2AIAgent"
+mod_project="$repo_root/STS2AIMCP/STS2AIMCP.csproj"
+build_output_dir="$repo_root/STS2AIMCP/bin/$configuration/net9.0"
 staging_dir="$repo_root/build/mods/$mod_name"
-pck_manifest_source="$repo_root/STS2AIAgent/mod_manifest.json"
-mod_json_source="$repo_root/STS2AIAgent/$mod_name.json"
+pck_manifest_source="$repo_root/STS2AIMCP/mod_manifest.json"
+mod_json_source="$repo_root/STS2AIMCP/$mod_name.json"
 dll_source="$build_output_dir/$mod_name.dll"
 pck_output="$staging_dir/$mod_name.pck"
 dll_target="$staging_dir/$mod_name.dll"
@@ -328,17 +329,27 @@ cp -f "$pck_output" "$installed_mod_dir/$mod_name.pck"
 cp -f "$mod_json_target" "$installed_mod_dir/$mod_name.json"
 
 legacy_root_files=()
-for legacy_file in "$mods_dir/$mod_name.dll" "$mods_dir/$mod_name.pck" "$mods_dir/mod_id.json"; do
+for legacy_file in "$mods_dir/$mod_name.dll" "$mods_dir/$mod_name.pck" "$mods_dir/$legacy_mod_name.dll" "$mods_dir/$legacy_mod_name.pck" "$mods_dir/mod_id.json"; do
   if [[ -e "$legacy_file" ]]; then
     legacy_root_files+=("$legacy_file")
   fi
 done
 
-if [[ ${#legacy_root_files[@]} -gt 0 ]]; then
-  echo "[build-mod] WARNING: Legacy root-level mod files were found in the mods directory." >&2
-  echo "[build-mod] Back them up and remove them before testing the folder-based install to avoid duplicate or stale mod loads:" >&2
+legacy_folders=()
+for legacy_folder in "$mods_dir/$legacy_mod_name"; do
+  if [[ -e "$legacy_folder" ]]; then
+    legacy_folders+=("$legacy_folder")
+  fi
+done
+
+if [[ ${#legacy_root_files[@]} -gt 0 || ${#legacy_folders[@]} -gt 0 ]]; then
+  echo "[build-mod] WARNING: Legacy STS2AIAgent mod files were found in the mods directory." >&2
+  echo "[build-mod] Back them up and remove them before testing STS2AIMCP to avoid duplicate or stale mod loads:" >&2
   for legacy_file in "${legacy_root_files[@]}"; do
     echo "[build-mod]   $legacy_file" >&2
+  done
+  for legacy_folder in "${legacy_folders[@]}"; do
+    echo "[build-mod]   $legacy_folder" >&2
   done
 fi
 

@@ -1,15 +1,15 @@
 using System.Threading;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
-using STS2AIAgent.Game;
-using STS2AIAgent.Server;
+using STS2AIMCP.Game;
+using STS2AIMCP.Server;
 
-namespace STS2AIAgent;
+namespace STS2AIMCP;
 
 [ModInitializer(nameof(Initialize))]
 public static class ModEntry
 {
-    private const string LogPrefix = "[STS2AIAgent]";
+    private const string LogPrefix = "[STS2AIMCP]";
 
     private static int _shutdownHooksRegistered;
 

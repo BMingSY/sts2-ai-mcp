@@ -2,13 +2,13 @@ using System.Net;
 using System.Threading;
 using MegaCrit.Sts2.Core.Logging;
 
-namespace STS2AIAgent.Server;
+namespace STS2AIMCP.Server;
 
 public sealed class HttpServer
 {
     private const string DefaultHost = "127.0.0.1";
     private const int DefaultPort = 8080;
-    private const string LogPrefix = "[STS2AIAgent.HttpServer]";
+    private const string LogPrefix = "[STS2AIMCP.HttpServer]";
     private const int StartRetryCount = 20;
     private static readonly TimeSpan StartRetryDelay = TimeSpan.FromMilliseconds(250);
 

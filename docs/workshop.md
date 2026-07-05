@@ -4,9 +4,9 @@ Slay the Spire 2 supports Steam Workshop subscriptions for mods. Subscribers rec
 
 The Workshop package for this project contains only the game-side mod:
 
-- `STS2AIAgent/STS2AIAgent.dll`
-- `STS2AIAgent/STS2AIAgent.pck`
-- `STS2AIAgent/STS2AIAgent.json`
+- `STS2AIMCP/STS2AIMCP.dll`
+- `STS2AIMCP/STS2AIMCP.pck`
+- `STS2AIMCP/STS2AIMCP.json`
 
 The MCP server is distributed separately from this repository. Users still need to install and run the MCP server locally.
 

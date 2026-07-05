@@ -1,11 +1,11 @@
 using System.Threading;
 using MegaCrit.Sts2.Core.Logging;
 
-namespace STS2AIAgent.Game;
+namespace STS2AIMCP.Game;
 
 internal static class GameThread
 {
-    private const string LogPrefix = "[STS2AIAgent.GameThread]";
+    private const string LogPrefix = "[STS2AIMCP.GameThread]";
 
     private static readonly object Gate = new();
 

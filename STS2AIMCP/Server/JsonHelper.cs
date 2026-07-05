@@ -1,7 +1,7 @@
 using System.IO;
 using System.Text.Json;
 
-namespace STS2AIAgent.Server;
+namespace STS2AIMCP.Server;
 
 internal static class JsonHelper
 {

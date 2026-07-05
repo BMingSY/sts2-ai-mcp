@@ -6,8 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <RootNamespace>STS2AIAgent</RootNamespace>
-    <AssemblyName>STS2AIAgent</AssemblyName>
+    <RootNamespace>STS2AIMCP</RootNamespace>
+    <AssemblyName>STS2AIMCP</AssemblyName>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <Sts2DataDirFromEnv>$([System.Environment]::GetEnvironmentVariable('STS2_DATA_DIR'))</Sts2DataDirFromEnv>
     <Sts2DataDir Condition="'$(Sts2DataDir)' == '' and '$(Sts2DataDirFromEnv)' != ''">$(Sts2DataDirFromEnv)</Sts2DataDir>

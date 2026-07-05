@@ -19,7 +19,7 @@ Recommended branch naming:
 
 For mod changes:
 
-- Run `dotnet build "STS2AIAgent/STS2AIAgent.csproj"`
+- Run `dotnet build "STS2AIMCP/STS2AIMCP.csproj"`
 - Run `powershell -ExecutionPolicy Bypass -File "scripts/build-mod.ps1"`
 - Run `powershell -ExecutionPolicy Bypass -File "scripts/test-mod-load.ps1"`
 

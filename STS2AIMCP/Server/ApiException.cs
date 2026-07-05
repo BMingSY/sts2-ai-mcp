@@ -1,4 +1,4 @@
-namespace STS2AIAgent.Server;
+namespace STS2AIMCP.Server;
 
 internal sealed class ApiException : Exception
 {

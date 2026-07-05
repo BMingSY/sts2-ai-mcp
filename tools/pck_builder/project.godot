@@ -5,5 +5,5 @@ config_version=5
 
 [application]
 
-config/name="STS2AIAgentPckBuilder"
+config/name="STS2AIMCPPckBuilder"
 run/main_scene=""
