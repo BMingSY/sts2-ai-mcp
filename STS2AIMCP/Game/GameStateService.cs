@@ -1932,16 +1932,17 @@ internal static class GameStateService
         var incomingDamage = EstimateIncomingDamage(enemyPayloads);
         var unblockedDamage = Math.Max(0, incomingDamage - playerPayload.block);
         var endTurnWillKillPlayer = incomingDamage > 0 && unblockedDamage >= playerPayload.current_hp;
+        var turnCardPlayCounts = BuildTurnCardPlayCounts(combatState, me);
 
         return new CombatPayload
         {
             player = playerPayload,
-            player_turn_number = GetReflectedNullableIntProperty(me.PlayerCombatState, "TurnNumber") ?? 0,
-            player_turn_phase = GetReflectedStringProperty(me.PlayerCombatState, "Phase"),
-            cards_played_this_turn = GetReflectedNullableIntProperty(me.PlayerCombatState, "CardsPlayedThisTurn") ?? 0,
-            attacks_played_this_turn = GetReflectedNullableIntProperty(me.PlayerCombatState, "AttacksPlayedThisTurn") ?? 0,
-            skills_played_this_turn = GetReflectedNullableIntProperty(me.PlayerCombatState, "SkillsPlayedThisTurn") ?? 0,
-            powers_played_this_turn = GetReflectedNullableIntProperty(me.PlayerCombatState, "PowersPlayedThisTurn") ?? 0,
+            player_turn_number = me.PlayerCombatState.TurnNumber,
+            player_turn_phase = me.PlayerCombatState.Phase.ToString(),
+            cards_played_this_turn = turnCardPlayCounts.Total,
+            attacks_played_this_turn = turnCardPlayCounts.Attacks,
+            skills_played_this_turn = turnCardPlayCounts.Skills,
+            powers_played_this_turn = turnCardPlayCounts.Powers,
             players = GetOrderedCombatPlayers(combatState)
                 .Select(player => BuildCombatPlayerSummaryPayload(player, combatState, connectedPlayerIds, me.NetId))
                 .ToArray(),
@@ -1958,6 +1959,23 @@ internal static class GameStateService
                 endTurnWillKillPlayer)
         };
     }
+
+    private static TurnCardPlayCounts BuildTurnCardPlayCounts(CombatState combatState, Player player)
+    {
+        var cardsPlayedThisTurn = CombatManager.Instance.History.CardPlaysFinished
+            .Where(entry => entry.HappenedThisTurn(combatState))
+            .Select(entry => entry.CardPlay.Card)
+            .Where(card => card.Owner.NetId == player.NetId)
+            .ToArray();
+
+        return new TurnCardPlayCounts(
+            Total: cardsPlayedThisTurn.Length,
+            Attacks: cardsPlayedThisTurn.Count(card => card.Type == CardType.Attack),
+            Skills: cardsPlayedThisTurn.Count(card => card.Type == CardType.Skill),
+            Powers: cardsPlayedThisTurn.Count(card => card.Type == CardType.Power));
+    }
+
+    private readonly record struct TurnCardPlayCounts(int Total, int Attacks, int Skills, int Powers);
 
     private static int EstimateIncomingDamage(IEnumerable<CombatEnemyPayload> enemies)
     {

@@ -479,6 +479,13 @@ The MCP profile name should be `ai_safe_v2`.
 
 `execute_action_plan` reduces agent round trips without weakening v2 stale-decision validation. The MCP server executes one step at a time, consumes each action response's `next_decision`, resolves the next intent against that fresh decision, and stops before any step that is unavailable or ambiguous.
 
+Agents should prefer a strict plan over repeated single actions when they have already
+evaluated a deterministic 2-5 step combat line and none of the planned cards draw,
+generate, return, transform, or randomly discard cards. Information-revealing plays
+and unresolved tactical branches should remain single-step. The manual driver accepts
+`batch ACTION_ID ACTION_ID ... | note` and converts current choices to stable-reference
+plan steps.
+
 ```json
 {
   "decision_id": "current-decision-id",

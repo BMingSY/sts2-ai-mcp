@@ -17,6 +17,16 @@ from fastmcp import Client
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_MCP_URL = os.environ.get("STS2_MCP_URL", "http://127.0.0.1:8765/mcp")
+_BATCH_COMBAT_KINDS = {"play_card", "use_potion"}
+_BATCH_SELECTOR_KEYS = (
+    "card_ref",
+    "card_id",
+    "card_name",
+    "target_ref",
+    "target_entity_ref",
+    "potion_id",
+    "option_index",
+)
 
 
 def _tool_data(result: Any) -> dict[str, Any]:
@@ -70,6 +80,48 @@ def _short_stack(stack: dict[str, Any]) -> str:
 
 def _md_cell(value: Any) -> str:
     return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ")
+
+
+def _batch_steps_from_action_ids(
+    decision: dict[str, Any],
+    action_ids: list[str],
+) -> tuple[list[dict[str, Any]], str | None]:
+    if len(action_ids) < 2:
+        return [], "batch requires at least two action ids"
+    if len(set(action_ids)) != len(action_ids):
+        return [], "batch action ids must be unique"
+
+    choices = {
+        str(choice.get("action_id")): choice
+        for choice in decision.get("choices") or []
+        if isinstance(choice, dict) and choice.get("action_id")
+    }
+    steps: list[dict[str, Any]] = []
+    for action_id in action_ids:
+        choice = choices.get(action_id)
+        if choice is None:
+            return [], f"action not in current choices: {action_id}"
+
+        kind = str(choice.get("kind") or "")
+        if kind not in _BATCH_COMBAT_KINDS:
+            return [], f"action is not combat-plan safe: {action_id} ({kind or 'unknown'})"
+
+        source = choice.get("source")
+        if not isinstance(source, dict):
+            return [], f"action has no stable source selectors: {action_id}"
+
+        step: dict[str, Any] = {"kind": kind}
+        for key in _BATCH_SELECTOR_KEYS:
+            if source.get(key) is not None:
+                step[key] = source[key]
+
+        if kind == "play_card" and not step.get("card_ref"):
+            return [], f"play_card action has no card_ref: {action_id}"
+        if kind == "use_potion" and not step.get("potion_id"):
+            return [], f"use_potion action has no potion_id: {action_id}"
+        steps.append(step)
+
+    return steps, None
 
 
 class ManualDriver:
@@ -294,6 +346,19 @@ class ManualDriver:
                     json.dumps(preview, ensure_ascii=False)[:1400],
                     flush=True,
                 )
+        batchable_action_ids = [
+            str(choice.get("action_id"))
+            for choice in decision.get("choices") or []
+            if isinstance(choice, dict)
+            and choice.get("kind") in _BATCH_COMBAT_KINDS
+            and choice.get("action_id")
+        ]
+        if len(batchable_action_ids) >= 2:
+            print(
+                "batch_hint: 对已完整评估且不会抽牌/生成牌/回收牌的2-5步线路，优先使用 "
+                "batch ACTION_ID ACTION_ID ... | 理由",
+                flush=True,
+            )
         if self.public_log_path:
             print("public_log_path:", self.public_log_path, flush=True)
             if self.internal_mcp_log_path:
@@ -457,6 +522,36 @@ async def main() -> None:
                     next_decision = data.get("next_decision")
                     if isinstance(next_decision, dict):
                         driver.last_decision = next_decision
+                elif line.startswith("batch "):
+                    text = line[6:]
+                    if "|" in text:
+                        action_ids_text, note = [part.strip() for part in text.split("|", 1)]
+                    else:
+                        action_ids_text, note = text.strip(), ""
+                    action_ids = shlex.split(action_ids_text)
+                    decision = driver.last_decision
+                    if not decision:
+                        print("ERR no decision; run state first", flush=True)
+                        continue
+                    steps, error = _batch_steps_from_action_ids(decision, action_ids)
+                    if error:
+                        print("ERR", error, flush=True)
+                        continue
+                    print("BATCH_STEPS:", json.dumps(steps, ensure_ascii=False), flush=True)
+                    result = await client.call_tool(
+                        "execute_action_plan",
+                        {
+                            "decision_id": decision.get("decision_id"),
+                            "steps": steps,
+                            "mode": "strict",
+                            "client_note": note,
+                        },
+                    )
+                    data = _tool_data(result)
+                    print("BATCH_RESULT:", json.dumps(data, ensure_ascii=False)[:10000], flush=True)
+                    next_decision = data.get("next_decision")
+                    if isinstance(next_decision, dict):
+                        driver.last_decision = next_decision
                 elif line.startswith("select "):
                     text = line[7:]
                     if "|" in text:
@@ -528,7 +623,7 @@ async def main() -> None:
                     print("FINISHED_LOG", driver.log_path, flush=True)
                 else:
                     print(
-                        "commands: state|current|act ACTION_ID | 中文理由|plan JSON_ARRAY | 中文理由|select CARD_REF... | 中文理由|lookup collection:id fields=a,b|note TEXT|finish TEXT|quit",
+                        "commands: state|current|act ACTION_ID | 中文理由|batch ACTION_ID ACTION_ID... | 中文理由|plan JSON_ARRAY | 中文理由|select CARD_REF... | 中文理由|lookup collection:id fields=a,b|note TEXT|finish TEXT|quit",
                         flush=True,
                     )
             except Exception as exc:

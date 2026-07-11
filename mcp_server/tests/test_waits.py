@@ -82,6 +82,27 @@ class FakeResponse:
 
 
 class WaitBehaviorTests(unittest.TestCase):
+    def test_wait_for_decision_does_not_retry_completed_long_poll(self) -> None:
+        client = Sts2Client(base_url="http://127.0.0.1:8080", max_retries=2)
+
+        with patch.object(client, "_request", return_value={"available": False}) as request_mock:
+            result = client.wait_for_decision(timeout_ms=20_000)
+
+        self.assertEqual(result, {"available": False})
+        request_mock.assert_called_once_with(
+            "POST",
+            "/v2/decision/wait",
+            payload={
+                "timeout_ms": 20_000,
+                "profile": "ai_safe",
+                "include_raw_state": False,
+                "include_relevant_game_data": True,
+                "after_decision_id": None,
+            },
+            is_action=True,
+            max_retries=0,
+        )
+
     def test_wait_for_event_keeps_processing_after_comments(self) -> None:
         client = Sts2Client(base_url="http://127.0.0.1:8080")
         clock = FakeClock()

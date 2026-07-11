@@ -1318,6 +1318,12 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
         ) -> dict[str, Any]:
             """Execute a short conditional plan, revalidating every step against each fresh v2 decision.
 
+            Prefer this over repeated take_action calls when the agent has already
+            evaluated a deterministic 2-5 step combat line whose cards do not draw,
+            generate, return, transform, or randomly discard cards. Typical safe plans
+            include several basic attacks/blocks or a fixed power-plus-block sequence.
+            Keep using take_action for information-revealing or unresolved choices.
+
             Supported kinds are play_card/use_potion (up to 5 steps) or
             select_deck_card/confirm_selection (up to 12 steps). Identify cards with
             card_ref and targeted choices with target_entity_ref or target_ref. Strict mode

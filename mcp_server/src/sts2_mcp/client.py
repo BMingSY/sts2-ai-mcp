@@ -119,6 +119,9 @@ class Sts2Client:
                 "after_decision_id": after_decision_id,
             },
             is_action=True,
+            # The Mod already long-polls for the full requested deadline. Retrying a
+            # retryable timeout here would multiply that deadline for no benefit.
+            max_retries=0,
         )
 
     def take_action(
