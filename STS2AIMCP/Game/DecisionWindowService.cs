@@ -572,10 +572,14 @@ internal static class DecisionWindowService
     {
         var source = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
+            ["card_ref"] = card.card_ref,
             ["card_id"] = card.card_id,
             ["card_name"] = card.name,
             ["card_keywords"] = card.keywords,
             ["card_mods"] = card.mods,
+            ["card_affliction_id"] = card.affliction_id,
+            ["card_affliction_name"] = card.affliction_name,
+            ["card_affliction_description"] = card.affliction_description,
             ["player_powers"] = FormatPowers(combat.player.powers)
         };
 
@@ -588,6 +592,7 @@ internal static class DecisionWindowService
                 var enemy = combat.enemies.FirstOrDefault(candidate => candidate.index == targetIndex.Value);
                 if (enemy != null)
                 {
+                    source["target_entity_ref"] = enemy.enemy_ref;
                     source["target_hp"] = enemy.current_hp;
                     source["target_block"] = enemy.block;
                     source["target_powers"] = FormatPowers(enemy.powers);
@@ -600,6 +605,7 @@ internal static class DecisionWindowService
                 if (targetIndex.Value >= 0 && targetIndex.Value < combat.players.Length)
                 {
                     var player = combat.players[targetIndex.Value];
+                    source["target_entity_ref"] = player.player_id;
                     source["target_hp"] = player.current_hp;
                     source["target_block"] = player.block;
                 }
@@ -615,6 +621,17 @@ internal static class DecisionWindowService
         int? targetIndex)
     {
         var notes = new List<string>();
+        var isBound = IsBoundAffliction(card);
+        if (!string.IsNullOrWhiteSpace(card.affliction_description))
+        {
+            notes.Add($"Affliction {card.affliction_name ?? card.affliction_id}: {card.affliction_description}");
+        }
+
+        if (isBound)
+        {
+            notes.Add("Only one Bound card can be played each turn; playing this card blocks the other Bound cards for the rest of the turn.");
+        }
+
         var damageBase = ExtractFirstInt(DealDamageRegex, card.rules_text);
         var hitCount = ResolveHitCount(card, combat.player.energy, combat.player.stars);
         var damageTargets = ResolvePreviewTargets(combat, card, targetIndex);
@@ -655,6 +672,26 @@ internal static class DecisionWindowService
             energy_cost = card.energy_cost,
             star_cost = card.star_cost,
             x_value = card.costs_x ? combat.player.energy : (int?)null,
+            affliction = string.IsNullOrWhiteSpace(card.affliction_id)
+                ? null
+                : new
+                {
+                    id = card.affliction_id,
+                    name = card.affliction_name,
+                    description = card.affliction_description,
+                    amount = card.affliction_amount
+                },
+            shared_play_limit = isBound
+                ? new
+                {
+                    group_id = "bound_cards",
+                    max_plays_per_turn = 1,
+                    affected_hand_indices = combat.hand
+                        .Where(IsBoundAffliction)
+                        .Select(candidate => candidate.index)
+                        .ToArray()
+                }
+                : null,
             damage = damageBase.HasValue
                 ? new
                 {
@@ -676,6 +713,13 @@ internal static class DecisionWindowService
             powers_applied = powersApplied,
             notes = notes.Distinct(StringComparer.Ordinal).ToArray()
         };
+    }
+
+    private static bool IsBoundAffliction(CombatHandCardPayload card)
+    {
+        return string.Equals(card.affliction_id, "BOUND", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(card.affliction_name, "Bound", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(card.affliction_name, "魂缚", StringComparison.Ordinal);
     }
 
     private static object BuildEndTurnPreview(CombatPayload combat)
@@ -978,8 +1022,10 @@ internal static class DecisionWindowService
             {
                 power.power_id,
                 power.name,
+                power.description,
                 power.amount,
                 power.is_debuff,
+                power.stack_type,
                 line = power.amount.HasValue
                     ? $"{power.name} {power.amount.Value}"
                     : power.name
@@ -1008,6 +1054,7 @@ internal static class DecisionWindowService
                     optionIndex: card.index,
                     sourceExtra: new Dictionary<string, object?>
                     {
+                        ["card_ref"] = card.card_ref,
                         ["card_id"] = card.card_id,
                         ["card_name"] = card.name,
                         ["keywords"] = card.keywords,
@@ -1168,17 +1215,29 @@ internal static class DecisionWindowService
         {
             foreach (var option in reward.rewards.Where(option => option.claimable))
             {
+                var isPotion = string.Equals(option.reward_type, "Potion", StringComparison.OrdinalIgnoreCase);
+                var rewardName = string.IsNullOrWhiteSpace(option.name) ? option.description : option.name;
+                var summary = string.IsNullOrWhiteSpace(option.details) ? option.description : option.details;
+                if (isPotion)
+                {
+                    summary = $"Potion belt has an open slot; claiming this reward does not require discarding a potion. {summary}";
+                }
+
                 choices.Add(IndexChoice(
                     $"reward:claim:{option.index}",
                     "claim_reward",
-                    $"Claim {option.reward_type}: {option.description}",
-                    option.description,
+                    $"Claim {option.reward_type}: {rewardName}",
+                    summary,
                     "claim_reward",
                     state.screen,
                     optionIndex: option.index,
                     sourceExtra: new Dictionary<string, object?>
                     {
-                        ["reward_type"] = option.reward_type
+                        ["reward_type"] = option.reward_type,
+                        ["reward_item_id"] = option.item_id,
+                        ["potion_id"] = isPotion ? option.item_id : null,
+                        ["potion_slot_available"] = isPotion ? true : null,
+                        ["requires_potion_discard"] = isPotion ? false : null
                     }));
             }
         }
@@ -2463,6 +2522,14 @@ internal static class DecisionWindowService
             {
                 Add("cards", card.card_id);
             }
+
+            foreach (var option in state.reward.rewards)
+            {
+                if (string.Equals(option.reward_type, "Potion", StringComparison.OrdinalIgnoreCase))
+                {
+                    Add("potions", option.item_id);
+                }
+            }
         }
 
         if (state.selection != null)
@@ -2975,6 +3042,25 @@ internal static class DecisionWindowService
                     ["mods"] = card.mods
                 });
             }
+
+            foreach (var option in state.reward.rewards)
+            {
+                if (!string.Equals(option.reward_type, "Potion", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                Add("potions", option.item_id, new Dictionary<string, object?>
+                {
+                    ["id"] = option.item_id,
+                    ["name"] = option.name,
+                    ["description"] = option.details,
+                    ["rarity"] = option.rarity,
+                    ["usage"] = option.usage,
+                    ["target"] = option.target_type,
+                    ["reward_claimable"] = option.claimable
+                });
+            }
         }
 
         if (state.selection != null)
@@ -3077,8 +3163,10 @@ internal static class DecisionWindowService
             {
                 ["id"] = power.power_id,
                 ["name"] = power.name,
+                ["description"] = power.description,
                 ["amount"] = power.amount,
-                ["is_debuff"] = power.is_debuff
+                ["is_debuff"] = power.is_debuff,
+                ["stack_type"] = power.stack_type
             });
         }
     }
@@ -3232,6 +3320,23 @@ internal static class DecisionWindowService
             System.Reflection.BindingFlags.Instance |
             System.Reflection.BindingFlags.Public |
             System.Reflection.BindingFlags.NonPublic;
+
+        // Formatting a LocString without its dynamic vars logs an error; raw text preserves its placeholders.
+        try
+        {
+            var method = value.GetType().GetMethod("GetRawText", flags, null, Type.EmptyTypes, null);
+            if (method != null && method.ReturnType == typeof(string))
+            {
+                var rawText = method.Invoke(value, null) as string;
+                if (!string.IsNullOrEmpty(rawText))
+                {
+                    return rawText;
+                }
+            }
+        }
+        catch
+        {
+        }
 
         try
         {

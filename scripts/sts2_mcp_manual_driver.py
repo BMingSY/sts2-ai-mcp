@@ -46,6 +46,9 @@ def _short_card(card: dict[str, Any]) -> str:
     parts = []
     if index is not None:
         parts.append(f"#{index}")
+    card_ref = card.get("card_ref")
+    if card_ref:
+        parts.append(f"ref={card_ref}")
     parts.append(str(name))
     if cost != "":
         parts.append(f"费{cost}")
@@ -274,6 +277,15 @@ class ManualDriver:
             )
             if choice.get("summary"):
                 line += f" summary={choice.get('summary')}"
+            source = choice.get("source")
+            if isinstance(source, dict):
+                refs = {
+                    key: source.get(key)
+                    for key in ("card_ref", "target_entity_ref", "target_ref", "potion_id")
+                    if source.get(key) is not None
+                }
+                if refs:
+                    line += f" refs={json.dumps(refs, ensure_ascii=False)}"
             print(line, flush=True)
             preview = choice.get("preview")
             if preview:
@@ -337,7 +349,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal", default="通关三层 Boss 或死亡。", help="Run goal written to the log header.")
     parser.add_argument(
         "--interface",
-        default="本地网络 MCP `ai_safe_v2`，工具 `wait_for_decision` / `take_action` / `lookup_game_data`。",
+        default="本地网络 MCP `ai_safe_v2`，工具 `wait_for_decision` / `take_action` / `execute_action_plan` / `select_cards` / `lookup_game_data`。",
         help="Interface description written to the log header.",
     )
     return parser.parse_args()
@@ -414,6 +426,62 @@ async def main() -> None:
                     data = _tool_data(result)
                     print("ACTION_RESULT:", json.dumps(data, ensure_ascii=False)[:4500], flush=True)
                     driver.append_log(action_id, note, data)
+                    next_decision = data.get("next_decision")
+                    if isinstance(next_decision, dict):
+                        driver.last_decision = next_decision
+                elif line.startswith("plan "):
+                    text = line[5:]
+                    if "|" in text:
+                        steps_text, note = [part.strip() for part in text.split("|", 1)]
+                    else:
+                        steps_text, note = text.strip(), ""
+                    steps = json.loads(steps_text)
+                    if not isinstance(steps, list):
+                        print("ERR plan must be a JSON array", flush=True)
+                        continue
+                    decision = driver.last_decision
+                    if not decision:
+                        print("ERR no decision; run state first", flush=True)
+                        continue
+                    result = await client.call_tool(
+                        "execute_action_plan",
+                        {
+                            "decision_id": decision.get("decision_id"),
+                            "steps": steps,
+                            "mode": "strict",
+                            "client_note": note,
+                        },
+                    )
+                    data = _tool_data(result)
+                    print("PLAN_RESULT:", json.dumps(data, ensure_ascii=False)[:10000], flush=True)
+                    next_decision = data.get("next_decision")
+                    if isinstance(next_decision, dict):
+                        driver.last_decision = next_decision
+                elif line.startswith("select "):
+                    text = line[7:]
+                    if "|" in text:
+                        refs_text, note = [part.strip() for part in text.split("|", 1)]
+                    else:
+                        refs_text, note = text.strip(), ""
+                    card_refs = shlex.split(refs_text)
+                    decision = driver.last_decision
+                    if not decision:
+                        print("ERR no decision; run state first", flush=True)
+                        continue
+                    result = await client.call_tool(
+                        "select_cards",
+                        {
+                            "decision_id": decision.get("decision_id"),
+                            "card_refs": card_refs,
+                            "confirm": True,
+                            "client_note": note,
+                        },
+                    )
+                    data = _tool_data(result)
+                    print("SELECT_RESULT:", json.dumps(data, ensure_ascii=False)[:10000], flush=True)
+                    next_decision = data.get("next_decision")
+                    if isinstance(next_decision, dict):
+                        driver.last_decision = next_decision
                 elif line.startswith("lookup "):
                     items: list[dict[str, str]] = []
                     fields: list[str] = []
@@ -460,7 +528,7 @@ async def main() -> None:
                     print("FINISHED_LOG", driver.log_path, flush=True)
                 else:
                     print(
-                        "commands: state|current|act ACTION_ID | 中文理由|lookup collection:id fields=a,b|note TEXT|finish TEXT|quit",
+                        "commands: state|current|act ACTION_ID | 中文理由|plan JSON_ARRAY | 中文理由|select CARD_REF... | 中文理由|lookup collection:id fields=a,b|note TEXT|finish TEXT|quit",
                         flush=True,
                     )
             except Exception as exc:

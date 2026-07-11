@@ -258,6 +258,8 @@ The client should call `wait_for_decision` after a pending timeout. Normal play 
 | `params_schema` | object | yes | JSON schema for any remaining params |
 | `preview` | object | no | Best-effort predicted result |
 
+Combat hand cards and selection candidates expose an opaque `card_ref` that remains stable for that runtime card object. Targeted combat choices expose `target_entity_ref` where available. Clients should use these references instead of carrying hand or enemy indices across decision windows.
+
 ### Risk Tags
 
 Initial tag set:
@@ -443,10 +445,39 @@ Recommended MCP behavior:
 | `wait_for_decision` | `POST /v2/decision/wait` |
 | `get_current_decision` | `GET /v2/decision/current` |
 | `take_action` | `POST /v2/decision/act` |
+| `execute_action_plan` | MCP-local orchestration over successive `POST /v2/decision/act` calls |
+| `select_cards` | MCP-local multi-select convenience wrapper over `execute_action_plan` |
 | `lookup_game_data` | `POST /v2/data/lookup` |
 | `append_decision_note` | MCP-local log append; optional, no HTTP endpoint required |
 
 The MCP profile name should be `ai_safe_v2`.
+
+### Conditional Action Plans
+
+`execute_action_plan` reduces agent round trips without weakening v2 stale-decision validation. The MCP server executes one step at a time, consumes each action response's `next_decision`, resolves the next intent against that fresh decision, and stops before any step that is unavailable or ambiguous.
+
+```json
+{
+  "decision_id": "current-decision-id",
+  "mode": "strict",
+  "plan_id": "optional-idempotency-key",
+  "client_note": "optional default note for every step",
+  "steps": [
+    {
+      "kind": "play_card",
+      "card_ref": "card:STRIKE:1234abcd",
+      "target_entity_ref": "enemy:QUEEN:5678ef01",
+      "note": "step-specific note"
+    }
+  ]
+}
+```
+
+Supported combat kinds are `play_card` and `use_potion`, with at most five steps. Supported selection kinds are `select_deck_card` and `confirm_selection`, with at most twelve steps. Combat and selection actions cannot be mixed in one plan. `end_turn` is intentionally unsupported.
+
+Strict combat plans stop when the phase changes, stable references are missing, a card is drawn or returned, an additional card leaves the hand, an action becomes illegal, or a selector matches zero or multiple choices. Results use partial-success semantics: completed game actions are logged individually and cannot be rolled back. The response includes `executed_count`, `stop_reason`, per-step results, and the latest `next_decision`.
+
+`select_cards` accepts the current `decision_id`, a unique list of `card_refs`, and `confirm=true|false`. It constructs the corresponding strict selection plan and confirms only when the fresh decision exposes a legal confirmation choice.
 
 ---
 

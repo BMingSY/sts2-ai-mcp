@@ -8,6 +8,8 @@ The default tool profile is `ai_safe_v2`. It exposes only the v2 decision-window
 - `wait_for_decision`
 - `get_current_decision`
 - `take_action`
+- `execute_action_plan`
+- `select_cards`
 - `lookup_game_data`
 - `append_decision_note`
 

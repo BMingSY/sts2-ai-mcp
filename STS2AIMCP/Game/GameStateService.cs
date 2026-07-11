@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using Godot;
 using MegaCrit.Sts2.Core.CardSelection;
@@ -1273,6 +1274,11 @@ internal static class GameStateService
         }
     }
 
+    private static string BuildRuntimeRef(string kind, string id, object instance)
+    {
+        return $"{kind}:{id}:{RuntimeHelpers.GetHashCode(instance):x8}";
+    }
+
     private static string GetCardRulesText(CardModel? card)
     {
         if (card == null)
@@ -1339,6 +1345,23 @@ internal static class GameStateService
 
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         var valueType = value.GetType();
+
+        // Formatting a LocString without its dynamic vars logs an error; raw text preserves its placeholders.
+        try
+        {
+            var getRawText = valueType.GetMethod("GetRawText", flags, null, Type.EmptyTypes, null);
+            if (getRawText != null && getRawText.ReturnType == typeof(string))
+            {
+                var rawText = getRawText.Invoke(value, null) as string;
+                if (!string.IsNullOrEmpty(rawText))
+                {
+                    return rawText;
+                }
+            }
+        }
+        catch
+        {
+        }
 
         try
         {
@@ -2157,6 +2180,7 @@ internal static class GameStateService
         foreach (var power in combat.player.powers.Concat(combat.enemies.SelectMany(enemy => enemy.powers)))
         {
             CollectGlossaryTerms(glossaryTerms, power.name, new[] { power.power_id });
+            CollectGlossaryTerms(glossaryTerms, power.description);
         }
 
         return new
@@ -2277,6 +2301,7 @@ internal static class GameStateService
         foreach (var option in reward.rewards)
         {
             CollectGlossaryTerms(glossaryTerms, option.description);
+            CollectGlossaryTerms(glossaryTerms, option.details);
         }
 
         return new
@@ -2286,7 +2311,9 @@ internal static class GameStateService
             rewards = reward.rewards.Select(option => new
             {
                 i = option.index,
-                line = $"{option.reward_type}: {option.description}",
+                id = option.item_id,
+                line = FormatRewardOptionLine(option),
+                details = option.details,
                 claimable = option.claimable
             }).ToArray(),
             cards = reward.card_options.Select(card => BuildAgentChoiceCardPayload(card.index, card.name, card.upgraded, null, null, false, false, card.rules_text, card.keywords, card.mods, glossaryTerms)).ToArray(),
@@ -2524,7 +2551,16 @@ internal static class GameStateService
             targets = card.requires_target ? card.valid_target_indices : Array.Empty<int>(),
             why = card.playable ? null : card.unplayable_reason,
             keywords,
-            mods
+            mods,
+            affliction = string.IsNullOrWhiteSpace(card.affliction_id)
+                ? null
+                : new
+                {
+                    id = card.affliction_id,
+                    name = card.affliction_name,
+                    description = card.affliction_description,
+                    amount = card.affliction_amount
+                }
         };
     }
 
@@ -2722,7 +2758,8 @@ internal static class GameStateService
     {
         var suffix = power.amount.HasValue ? $" {power.amount.Value}" : string.Empty;
         var kind = power.is_debuff ? "debuff" : "buff";
-        return $"{power.name}{suffix} [{kind}:{power.power_id}]";
+        var description = string.IsNullOrWhiteSpace(power.description) ? string.Empty : $"：{power.description}";
+        return $"{power.name}{suffix} [{kind}:{power.power_id}]{description}";
     }
 
     private static string FormatPotionLine(RunPotionPayload potion)
@@ -2860,6 +2897,7 @@ internal static class GameStateService
             "ModifierIds",
             "Affixes",
             "Augments",
+            "Affliction",
             "Keywords"
         })
         {
@@ -3635,10 +3673,12 @@ internal static class GameStateService
         var rulesText = GetCardRulesText(card);
         var mods = GetCardModifierTags(card);
         var keywords = GetGlossaryMatches(rulesText, mods);
+        var affliction = card.Affliction;
 
         return new CombatHandCardPayload
         {
             index = index,
+            card_ref = BuildRuntimeRef("card", card.Id.Entry, card),
             card_id = card.Id.Entry,
             name = card.Title,
             upgraded = card.IsUpgraded,
@@ -3655,6 +3695,10 @@ internal static class GameStateService
             rules_text = rulesText,
             keywords = keywords,
             mods = mods,
+            affliction_id = affliction?.Id.Entry,
+            affliction_name = affliction?.Title.GetFormattedText(),
+            affliction_description = affliction?.DynamicDescription.GetFormattedText(),
+            affliction_amount = affliction?.Amount,
             playable = targetSupported && reason == UnplayableReason.None,
             unplayable_reason = targetSupported
                 ? GetUnplayableReasonCode(reason)
@@ -3670,6 +3714,7 @@ internal static class GameStateService
         return new CombatEnemyPayload
         {
             index = index,
+            enemy_ref = BuildRuntimeRef("enemy", enemy.ModelId.Entry, enemy),
             enemy_id = enemy.ModelId.Entry,
             name = enemy.Name,
             current_hp = enemy.CurrentHp,
@@ -3697,15 +3742,15 @@ internal static class GameStateService
 
         foreach (var power in powersEnumerable)
         {
-            if (power == null)
+            if (power is not PowerModel powerModel)
             {
                 continue;
             }
 
-            var powerType = power.GetType();
+            var powerType = powerModel.GetType();
             var idEntry = SafeReadString(() =>
             {
-                var idValue = powerType.GetProperty("Id")?.GetValue(power);
+                var idValue = powerType.GetProperty("Id")?.GetValue(powerModel);
                 if (idValue == null)
                 {
                     return string.Empty;
@@ -3716,7 +3761,7 @@ internal static class GameStateService
 
             var title = SafeReadString(() =>
             {
-                var titleValue = powerType.GetProperty("Title")?.GetValue(power);
+                var titleValue = powerType.GetProperty("Title")?.GetValue(powerModel);
                 if (titleValue == null)
                 {
                     return string.Empty;
@@ -3725,11 +3770,11 @@ internal static class GameStateService
                 return titleValue.GetType().GetMethod("GetFormattedText")?.Invoke(titleValue, null)?.ToString();
             });
 
-            var amount = GetReflectedNullableIntProperty(power, "Amount");
+            var amount = GetReflectedNullableIntProperty(powerModel, "Amount");
 
             var isDebuff = string.Equals(
-                GetReflectedProperty(power, "TypeForCurrentAmount")?.ToString()
-                    ?? GetReflectedProperty(power, "Type")?.ToString(),
+                GetReflectedProperty(powerModel, "TypeForCurrentAmount")?.ToString()
+                    ?? GetReflectedProperty(powerModel, "Type")?.ToString(),
                 "Debuff",
                 StringComparison.Ordinal);
 
@@ -3738,13 +3783,30 @@ internal static class GameStateService
                 index = index,
                 power_id = string.IsNullOrWhiteSpace(idEntry) ? "unknown_power" : idEntry,
                 name = string.IsNullOrWhiteSpace(title) ? idEntry : title,
+                description = GetPowerDescription(powerModel),
                 amount = amount,
-                is_debuff = isDebuff
+                is_debuff = isDebuff,
+                stack_type = powerModel.StackType.ToString()
             });
             index += 1;
         }
 
         return result.ToArray();
+    }
+
+    private static string? GetPowerDescription(PowerModel power)
+    {
+        try
+        {
+            var description = power.HasSmartDescription ? power.SmartDescription : power.Description;
+            description.Add("Amount", power.Amount);
+            power.DynamicVars.AddTo(description);
+            return description.GetFormattedText();
+        }
+        catch
+        {
+            return GetDynamicFormattedTextProperty(power, "SmartDescription", "Description");
+        }
     }
 
     private static CombatEnemyIntentPayload[] BuildEnemyIntentPayloads(Creature enemy)
@@ -3944,14 +4006,28 @@ internal static class GameStateService
     private static RewardOptionPayload BuildRewardOptionPayload(NRewardButton button, int index)
     {
         var reward = button.Reward;
+        var potion = (reward as PotionReward)?.Potion;
 
         return new RewardOptionPayload
         {
             index = index,
             reward_type = GetRewardTypeName(reward),
             description = reward?.Description.GetFormattedText() ?? string.Empty,
+            item_id = potion?.Id.Entry,
+            name = potion?.Title.GetFormattedText(),
+            details = potion != null ? GetDynamicFormattedTextProperty(potion, "DynamicDescription", "Description") : null,
+            rarity = potion?.Rarity.ToString(),
+            usage = potion?.Usage.ToString(),
+            target_type = potion?.TargetType.ToString(),
             claimable = IsRewardButtonClaimable(button)
         };
+    }
+
+    private static string FormatRewardOptionLine(RewardOptionPayload option)
+    {
+        var label = string.IsNullOrWhiteSpace(option.name) ? option.description : option.name;
+        var details = string.IsNullOrWhiteSpace(option.details) ? string.Empty : $"：{option.details}";
+        return $"{option.reward_type}: {label}{details}";
     }
 
     private static RewardCardOptionPayload BuildRewardCardOptionPayload(NCardHolder holder, int index)
@@ -4361,6 +4437,7 @@ internal static class GameStateService
         return new SelectionCardPayload
         {
             index = index,
+            card_ref = BuildRuntimeRef("card", card.Id.Entry, card),
             card_id = card.Id.Entry,
             name = card.Title,
             upgraded = card.IsUpgraded,
@@ -5680,6 +5757,8 @@ internal sealed class CombatHandCardPayload
 {
     public int index { get; init; }
 
+    public string card_ref { get; init; } = string.Empty;
+
     public string card_id { get; init; } = string.Empty;
 
     public string name { get; init; } = string.Empty;
@@ -5712,6 +5791,14 @@ internal sealed class CombatHandCardPayload
 
     public string[] mods { get; init; } = Array.Empty<string>();
 
+    public string? affliction_id { get; init; }
+
+    public string? affliction_name { get; init; }
+
+    public string? affliction_description { get; init; }
+
+    public int? affliction_amount { get; init; }
+
     public bool playable { get; init; }
 
     public string? unplayable_reason { get; init; }
@@ -5720,6 +5807,8 @@ internal sealed class CombatHandCardPayload
 internal sealed class CombatEnemyPayload
 {
     public int index { get; init; }
+
+    public string enemy_ref { get; init; } = string.Empty;
 
     public string enemy_id { get; init; } = string.Empty;
 
@@ -5769,9 +5858,13 @@ internal sealed class CombatPowerPayload
 
     public string name { get; init; } = string.Empty;
 
+    public string? description { get; init; }
+
     public int? amount { get; init; }
 
     public bool is_debuff { get; init; }
+
+    public string? stack_type { get; init; }
 }
 
 internal sealed class RewardPayload
@@ -5824,6 +5917,18 @@ internal sealed class RewardOptionPayload
     public string reward_type { get; init; } = string.Empty;
 
     public string description { get; init; } = string.Empty;
+
+    public string? item_id { get; init; }
+
+    public string? name { get; init; }
+
+    public string? details { get; init; }
+
+    public string? rarity { get; init; }
+
+    public string? usage { get; init; }
+
+    public string? target_type { get; init; }
 
     public bool claimable { get; init; }
 }
@@ -5886,6 +5991,8 @@ internal sealed class DeckCardPayload
 internal sealed class SelectionCardPayload
 {
     public int index { get; init; }
+
+    public string card_ref { get; init; } = string.Empty;
 
     public string card_id { get; init; } = string.Empty;
 

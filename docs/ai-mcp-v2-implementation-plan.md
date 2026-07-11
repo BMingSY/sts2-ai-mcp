@@ -131,6 +131,8 @@ Deliverables:
   - `wait_for_decision`
   - `get_current_decision`
   - `take_action`
+  - `execute_action_plan`
+  - `select_cards`
   - `lookup_game_data`
   - optional `append_decision_note`
 
@@ -139,7 +141,7 @@ Validation:
 - Existing v1 guided/full profiles still work.
 - `ai_safe_v2` does not expose `resolve_rewards`, `collect_rewards_and_proceed`, direct per-action tools, or debug console actions.
 - `discard_potion` is visible when the game exposes it, with an irreversible/caution tag.
-- A simple MCP client can play one action at a time using only decision ids and action ids.
+- A simple MCP client can play one action at a time using only decision ids and action ids, while strict short plans revalidate every step against successive decision windows.
 
 ### M6: Real-Run Regression
 

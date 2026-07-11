@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from typing_extensions import NotRequired, TypedDict
 
 from fastmcp import FastMCP
 
@@ -17,6 +18,19 @@ from .handoff import Sts2HandoffService
 from .knowledge import Sts2KnowledgeBase
 
 ToolHandler = Callable[..., dict[str, Any]]
+
+
+class ActionPlanStep(TypedDict):
+    kind: str
+    action_id: NotRequired[str]
+    card_ref: NotRequired[str]
+    card_id: NotRequired[str]
+    card_name: NotRequired[str]
+    target_ref: NotRequired[str]
+    target_entity_ref: NotRequired[str]
+    potion_id: NotRequired[str]
+    option_index: NotRequired[int]
+    note: NotRequired[str]
 
 JSON_FILE_EXTENSION = ".json"
 JSON_FILE_EXTENSION_LENGTH = len(JSON_FILE_EXTENSION)
@@ -39,6 +53,27 @@ _GAME_DATA_CACHE: dict[str, Any] | None = None
 _GAME_DATA_INDEXES: dict[str, dict[str, Any]] = {}
 _GAME_DATA_CACHE_LOCK = threading.Lock()
 _GAME_DATA_INDEXES_LOCK = threading.Lock()
+
+_PLAN_ALLOWED_KINDS = {
+    "play_card",
+    "use_potion",
+    "select_deck_card",
+    "confirm_selection",
+}
+_PLAN_COMBAT_KINDS = {"play_card", "use_potion"}
+_PLAN_SELECTION_KINDS = {"select_deck_card", "confirm_selection"}
+_PLAN_SELECTOR_KEYS = (
+    "card_ref",
+    "card_id",
+    "card_name",
+    "target_ref",
+    "target_entity_ref",
+    "potion_id",
+    "option_index",
+)
+_MAX_COMBAT_PLAN_STEPS = 5
+_MAX_SELECTION_PLAN_STEPS = 12
+_MAX_CACHED_PLAN_RESULTS = 128
 
 _SCENE_FIELD_SETS: dict[str, dict[str, list[str]]] = {
     SCENE_COMBAT: {
@@ -427,6 +462,99 @@ def _find_choice(decision: dict[str, Any] | None, action_id: str) -> dict[str, A
     return None
 
 
+def _match_plan_choice(
+    decision: dict[str, Any],
+    step: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, int]:
+    choices = decision.get("choices")
+    if not isinstance(choices, list):
+        return None, "decision_has_no_choices", 0
+
+    action_id = str(step.get("action_id") or "").strip()
+    if action_id:
+        choice = _find_choice(decision, action_id)
+        return (choice, None, 1) if choice is not None else (None, "action_id_not_available", 0)
+
+    kind = str(step.get("kind") or "").strip()
+    if not kind:
+        return None, "step_requires_kind_or_action_id", 0
+
+    candidates = [choice for choice in choices if isinstance(choice, dict) and choice.get("kind") == kind]
+    for key in _PLAN_SELECTOR_KEYS:
+        if key not in step or step.get(key) is None:
+            continue
+        expected = step.get(key)
+        candidates = [
+            choice
+            for choice in candidates
+            if isinstance(choice.get("source"), dict) and choice["source"].get(key) == expected
+        ]
+
+    if len(candidates) == 1:
+        return candidates[0], None, 1
+    if not candidates:
+        return None, "planned_action_not_available", 0
+    return None, "planned_action_is_ambiguous", len(candidates)
+
+
+def _combat_hand_refs(decision: dict[str, Any]) -> set[str] | None:
+    context = decision.get("context")
+    combat = context.get("combat") if isinstance(context, dict) else None
+    hand = combat.get("hand") if isinstance(combat, dict) else None
+    if not isinstance(hand, list):
+        return None
+
+    refs: set[str] = set()
+    for card in hand:
+        card_ref = card.get("card_ref") if isinstance(card, dict) else None
+        if not isinstance(card_ref, str) or not card_ref:
+            return None
+        refs.add(card_ref)
+    return refs
+
+
+def _strict_plan_transition_error(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    choice: dict[str, Any],
+    next_step: dict[str, Any],
+) -> str | None:
+    before_phase = before.get("phase")
+    after_phase = after.get("phase")
+    if before_phase != after_phase:
+        return "decision_phase_changed"
+
+    kind = str(choice.get("kind") or "")
+    if kind not in _PLAN_COMBAT_KINDS:
+        return None
+
+    before_refs = _combat_hand_refs(before)
+    after_refs = _combat_hand_refs(after)
+    if before_refs is None or after_refs is None:
+        return "combat_hand_refs_unavailable"
+
+    if kind == "use_potion":
+        if before_refs != after_refs:
+            return "combat_hand_changed_after_potion"
+        return None
+
+    source = choice.get("source")
+    played_ref = source.get("card_ref") if isinstance(source, dict) else None
+    if not isinstance(played_ref, str) or not played_ref:
+        return "played_card_ref_unavailable"
+
+    expected_after = before_refs - {played_ref}
+    if after_refs - expected_after:
+        return "combat_hand_gained_or_returned_cards"
+    if expected_after - after_refs:
+        return "combat_hand_lost_additional_cards"
+
+    next_kind = str(next_step.get("kind") or "")
+    if next_kind and next_kind not in _PLAN_COMBAT_KINDS:
+        return "combat_plan_crosses_action_category"
+    return None
+
+
 def _append_decision_log(
     *,
     decision: dict[str, Any] | None,
@@ -549,6 +677,7 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
     profile = _normalize_tool_profile(tool_profile)
     mcp = FastMCP("STS2 AI MCP")
     decision_cache: dict[str, dict[str, Any]] = {}
+    plan_result_cache: dict[str, tuple[str, dict[str, Any]]] = {}
 
     def _agent_state() -> dict[str, Any]:
         state = sts2.get_state()
@@ -638,6 +767,339 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
             decision_cache[decision["decision_id"]] = decision
         return payload
 
+    def _cache_next_decision(result: dict[str, Any]) -> dict[str, Any] | None:
+        decision = result.get("next_decision")
+        if isinstance(decision, dict) and isinstance(decision.get("decision_id"), str):
+            decision_cache[decision["decision_id"]] = decision
+            return decision
+        return None
+
+    def _resolve_plan_start(decision_id: str) -> dict[str, Any] | None:
+        decision = decision_cache.get(decision_id)
+        if decision is not None:
+            return decision
+
+        try:
+            payload = _cache_decision(
+                sts2.get_current_decision(
+                    profile="ai_safe",
+                    include_raw_state=False,
+                    include_relevant_game_data=False,
+                )
+            )
+        except Sts2ApiError:
+            return None
+        current = payload.get("decision")
+        if isinstance(current, dict) and current.get("decision_id") == decision_id:
+            return current
+        return None
+
+    def _resolve_plan_next(result: dict[str, Any], previous_decision_id: str) -> dict[str, Any] | None:
+        next_decision = _cache_next_decision(result)
+        if next_decision is not None:
+            return next_decision
+
+        try:
+            payload = _cache_decision(
+                sts2.wait_for_decision(
+                    timeout_ms=5_000,
+                    profile="ai_safe",
+                    include_raw_state=False,
+                    include_relevant_game_data=False,
+                    after_decision_id=previous_decision_id,
+                )
+            )
+        except Sts2ApiError:
+            return None
+        decision = payload.get("decision")
+        return decision if isinstance(decision, dict) else None
+
+    def _take_logged_action(
+        decision: dict[str, Any] | None,
+        decision_id: str,
+        action_id: str,
+        client_note: str | None,
+    ) -> dict[str, Any]:
+        result = sts2.take_action(
+            decision_id=decision_id,
+            action_id=action_id,
+            params={},
+            client_note=client_note,
+        )
+        _cache_next_decision(result)
+        logging_result = _append_decision_log(
+            decision=decision,
+            action_id=action_id,
+            client_note=client_note,
+            result=result,
+        )
+        if logging_result.get("ok") is False:
+            return {**result, "logging_warning": logging_result.get("warning")}
+        return {**result, "logging": logging_result}
+
+    def _execute_action_plan_impl(
+        decision_id: str,
+        steps: list[dict[str, Any]],
+        mode: str,
+        client_note: str | None,
+    ) -> dict[str, Any]:
+        normalized_mode = (mode or "strict").strip().lower()
+        if normalized_mode != "strict":
+            return {
+                "status": "rejected",
+                "stable": True,
+                "executed_count": 0,
+                "requested_count": len(steps),
+                "stop_reason": "only_strict_mode_is_supported",
+            }
+        if not steps:
+            return {
+                "status": "rejected",
+                "stable": True,
+                "executed_count": 0,
+                "requested_count": 0,
+                "stop_reason": "plan_requires_at_least_one_step",
+            }
+        if not all(isinstance(step, dict) for step in steps):
+            return {
+                "status": "rejected",
+                "stable": True,
+                "executed_count": 0,
+                "requested_count": len(steps),
+                "stop_reason": "each_plan_step_must_be_an_object",
+            }
+
+        if any(not str(step.get("kind") or "").strip() for step in steps):
+            return {
+                "status": "rejected",
+                "stable": True,
+                "executed_count": 0,
+                "requested_count": len(steps),
+                "stop_reason": "each_plan_step_requires_kind",
+            }
+
+        requested_kinds = {str(step.get("kind") or "").strip() for step in steps}
+        unsupported = requested_kinds - _PLAN_ALLOWED_KINDS
+        if unsupported:
+            return {
+                "status": "rejected",
+                "stable": True,
+                "executed_count": 0,
+                "requested_count": len(steps),
+                "stop_reason": "unsupported_action_kind",
+                "unsupported_kinds": sorted(unsupported),
+            }
+
+        contains_combat = bool(requested_kinds & _PLAN_COMBAT_KINDS)
+        contains_selection = bool(requested_kinds & _PLAN_SELECTION_KINDS)
+        if contains_combat and contains_selection:
+            return {
+                "status": "rejected",
+                "stable": True,
+                "executed_count": 0,
+                "requested_count": len(steps),
+                "stop_reason": "plan_cannot_mix_combat_and_selection_actions",
+            }
+
+        selected_refs = [
+            str(step.get("card_ref") or "").strip()
+            for step in steps
+            if step.get("kind") == "select_deck_card" and step.get("card_ref")
+        ]
+        if len(set(selected_refs)) != len(selected_refs):
+            return {
+                "status": "rejected",
+                "stable": True,
+                "executed_count": 0,
+                "requested_count": len(steps),
+                "stop_reason": "selection_card_refs_must_be_unique",
+            }
+
+        max_steps = _MAX_COMBAT_PLAN_STEPS if contains_combat else _MAX_SELECTION_PLAN_STEPS
+        if len(steps) > max_steps:
+            return {
+                "status": "rejected",
+                "stable": True,
+                "executed_count": 0,
+                "requested_count": len(steps),
+                "stop_reason": "plan_too_long",
+                "max_steps": max_steps,
+            }
+
+        decision = _resolve_plan_start(decision_id)
+        if decision is None:
+            return {
+                "status": "stopped",
+                "stable": True,
+                "executed_count": 0,
+                "requested_count": len(steps),
+                "stop_reason": "starting_decision_is_not_current",
+            }
+
+        executed: list[dict[str, Any]] = []
+        next_decision: dict[str, Any] | None = decision
+        for index, step in enumerate(steps):
+            choice, match_error, match_count = _match_plan_choice(decision, step)
+            if choice is None:
+                return {
+                    "status": "stopped",
+                    "stable": True,
+                    "executed_count": len(executed),
+                    "requested_count": len(steps),
+                    "stop_reason": match_error,
+                    "match_count": match_count,
+                    "stopped_before_step": index,
+                    "steps": executed,
+                    "next_decision": decision,
+                }
+
+            kind = str(choice.get("kind") or "")
+            if kind not in _PLAN_ALLOWED_KINDS:
+                return {
+                    "status": "stopped",
+                    "stable": True,
+                    "executed_count": len(executed),
+                    "requested_count": len(steps),
+                    "stop_reason": "resolved_action_kind_is_not_plan_safe",
+                    "resolved_kind": kind,
+                    "stopped_before_step": index,
+                    "steps": executed,
+                    "next_decision": decision,
+                }
+
+            current_decision_id = str(decision.get("decision_id") or "")
+            action_id = str(choice.get("action_id") or "")
+            step_note = step.get("note") if isinstance(step.get("note"), str) else client_note
+            try:
+                action_result = _take_logged_action(
+                    decision=decision,
+                    decision_id=current_decision_id,
+                    action_id=action_id,
+                    client_note=step_note,
+                )
+            except Sts2ApiError as exc:
+                return {
+                    "status": "stopped",
+                    "stable": False,
+                    "executed_count": len(executed),
+                    "requested_count": len(steps),
+                    "stop_reason": "action_error",
+                    "stopped_at_step": index,
+                    "error": {
+                        "code": exc.code,
+                        "message": exc.message,
+                        "retryable": exc.retryable,
+                        "details": exc.details,
+                    },
+                    "steps": executed,
+                    "next_decision": decision,
+                }
+
+            executed.append(
+                {
+                    "step": index,
+                    "decision_id": current_decision_id,
+                    "action_id": action_id,
+                    "kind": kind,
+                    "status": action_result.get("status"),
+                    "stable": action_result.get("stable"),
+                    "logging": action_result.get("logging"),
+                    "logging_warning": action_result.get("logging_warning"),
+                }
+            )
+            if action_result.get("stable") is not True:
+                return {
+                    "status": "stopped",
+                    "stable": False,
+                    "executed_count": len(executed),
+                    "requested_count": len(steps),
+                    "stop_reason": "action_did_not_reach_stable_state",
+                    "stopped_at_step": index,
+                    "steps": executed,
+                    "next_decision": _cache_next_decision(action_result),
+                }
+
+            next_decision = _resolve_plan_next(action_result, current_decision_id)
+            if index == len(steps) - 1:
+                break
+            if next_decision is None:
+                return {
+                    "status": "stopped",
+                    "stable": True,
+                    "executed_count": len(executed),
+                    "requested_count": len(steps),
+                    "stop_reason": "next_decision_unavailable",
+                    "stopped_after_step": index,
+                    "steps": executed,
+                }
+
+            transition_error = _strict_plan_transition_error(
+                before=decision,
+                after=next_decision,
+                choice=choice,
+                next_step=steps[index + 1],
+            )
+            if transition_error:
+                return {
+                    "status": "stopped",
+                    "stable": True,
+                    "executed_count": len(executed),
+                    "requested_count": len(steps),
+                    "stop_reason": transition_error,
+                    "stopped_after_step": index,
+                    "steps": executed,
+                    "next_decision": next_decision,
+                }
+            decision = next_decision
+
+        return {
+            "status": "completed",
+            "stable": True,
+            "executed_count": len(executed),
+            "requested_count": len(steps),
+            "stop_reason": None,
+            "steps": executed,
+            "next_decision": next_decision,
+        }
+
+    def _execute_cached_action_plan(
+        decision_id: str,
+        steps: list[dict[str, Any]],
+        mode: str,
+        client_note: str | None,
+        plan_id: str | None,
+    ) -> dict[str, Any]:
+        normalized_plan_id = (plan_id or "").strip()
+        fingerprint = json.dumps(
+            {
+                "decision_id": decision_id,
+                "steps": steps,
+                "mode": mode,
+                "client_note": client_note,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if normalized_plan_id and normalized_plan_id in plan_result_cache:
+            cached_fingerprint, cached_result = plan_result_cache[normalized_plan_id]
+            if cached_fingerprint != fingerprint:
+                return {
+                    "status": "rejected",
+                    "stable": True,
+                    "executed_count": 0,
+                    "requested_count": len(steps),
+                    "stop_reason": "plan_id_reused_with_different_request",
+                }
+            return {**cached_result, "idempotent_replay": True}
+
+        result = _execute_action_plan_impl(decision_id, steps, mode, client_note)
+        if normalized_plan_id:
+            if len(plan_result_cache) >= _MAX_CACHED_PLAN_RESULTS:
+                plan_result_cache.pop(next(iter(plan_result_cache)))
+            plan_result_cache[normalized_plan_id] = (fingerprint, result)
+        return result
+
     def _lookup_game_data(items: list[dict[str, Any]], fields: list[str] | None = None) -> dict[str, Any]:
         requested_fields = [field.strip() for field in (fields or []) if field and field.strip()]
         result: dict[str, Any] = {}
@@ -672,6 +1134,8 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
                     "wait_for_decision",
                     "get_current_decision",
                     "take_action",
+                    "execute_action_plan",
+                    "select_cards",
                     "lookup_game_data",
                     "append_decision_note",
                 ] if profile == "ai_safe_v2" else None,
@@ -719,21 +1183,77 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
         ) -> dict[str, Any]:
             """Execute one action from the current v2 decision window."""
             decision = decision_cache.get(decision_id)
-            result = sts2.take_action(
+            return _take_logged_action(
+                decision=decision,
                 decision_id=decision_id,
                 action_id=action_id,
-                params={},
                 client_note=client_note,
             )
-            logging_result = _append_decision_log(
-                decision=decision,
-                action_id=action_id,
+
+        @mcp.tool
+        def execute_action_plan(
+            decision_id: str,
+            steps: list[ActionPlanStep],
+            mode: str = "strict",
+            client_note: str | None = None,
+            plan_id: str | None = None,
+        ) -> dict[str, Any]:
+            """Execute a short conditional plan, revalidating every step against each fresh v2 decision.
+
+            Supported kinds are play_card/use_potion (up to 5 steps) or
+            select_deck_card/confirm_selection (up to 12 steps). Identify cards with
+            card_ref and targeted choices with target_entity_ref or target_ref. Strict mode
+            stops on phase changes, draws, returned cards, extra discards, ambiguity, or
+            any unavailable action. Previously completed steps are not rolled back.
+            """
+            return _execute_cached_action_plan(
+                decision_id=decision_id,
+                steps=steps,
+                mode=mode,
                 client_note=client_note,
-                result=result,
+                plan_id=plan_id,
             )
-            if logging_result.get("ok") is False:
-                return {**result, "logging_warning": logging_result.get("warning")}
-            return {**result, "logging": logging_result}
+
+        @mcp.tool
+        def select_cards(
+            decision_id: str,
+            card_refs: list[str],
+            confirm: bool = True,
+            client_note: str | None = None,
+            plan_id: str | None = None,
+        ) -> dict[str, Any]:
+            """Select several cards from one current selection overlay and optionally confirm."""
+            normalized_refs = [str(card_ref).strip() for card_ref in card_refs if str(card_ref).strip()]
+            if not normalized_refs:
+                return {
+                    "status": "rejected",
+                    "stable": True,
+                    "executed_count": 0,
+                    "requested_count": 0,
+                    "stop_reason": "card_refs_must_not_be_empty",
+                }
+            if len(set(normalized_refs)) != len(normalized_refs):
+                return {
+                    "status": "rejected",
+                    "stable": True,
+                    "executed_count": 0,
+                    "requested_count": len(normalized_refs),
+                    "stop_reason": "card_refs_must_be_unique",
+                }
+
+            steps: list[dict[str, Any]] = [
+                {"kind": "select_deck_card", "card_ref": card_ref}
+                for card_ref in normalized_refs
+            ]
+            if confirm:
+                steps.append({"kind": "confirm_selection"})
+            return _execute_cached_action_plan(
+                decision_id=decision_id,
+                steps=steps,
+                mode="strict",
+                client_note=client_note,
+                plan_id=plan_id,
+            )
 
         @mcp.tool
         def lookup_game_data(items: list[dict[str, Any]], fields: list[str] | None = None) -> dict[str, Any]:
