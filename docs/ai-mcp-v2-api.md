@@ -284,10 +284,19 @@ Initial tag set:
 `context.combat` should include:
 
 - player HP, block, energy, stars, focus, powers, orbs
-- hand cards with card instance refs, costs, playable status, text, valid targets
-- enemies with ids, HP/block, powers, move ids, structured intents
+- hand cards with card instance refs, costs, playable status, valid targets,
+  resolved `rules_text`, the localization template in `raw_rules_text`, and live
+  `dynamic_vars` (`base_value`, `enchanted_value`, and game-computed
+  `preview_value`)
+- enemies with ids, `current_hp`/`max_hp`, block, powers, move ids, and
+  structured intents
 - draw/discard/exhaust summaries when available
 - lethal risk fields
+
+Combat card previews should prefer the live dynamic-variable snapshot over
+localized text parsing. This keeps damage and Block previews available when the
+raw localization template contains placeholders such as `{Damage:diff()}` or
+`{Block:diff()}`.
 
 Choices:
 

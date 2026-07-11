@@ -76,3 +76,9 @@ def test_batch_requires_multiple_unique_actions() -> None:
     )
     assert steps == []
     assert error == "batch action ids must be unique"
+
+
+def test_current_hp_prefers_v2_field_and_supports_legacy_payloads() -> None:
+    assert DRIVER._current_hp({"current_hp": 37, "hp": 99}) == 37
+    assert DRIVER._current_hp({"hp": 21}) == 21
+    assert DRIVER._current_hp({"current_hp": 0}) == 0

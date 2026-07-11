@@ -78,6 +78,13 @@ def _short_stack(stack: dict[str, Any]) -> str:
     return f"{prefix}({card_type})" if card_type else prefix
 
 
+def _current_hp(payload: dict[str, Any]) -> Any:
+    """Read the v2 HP field while retaining compatibility with older payloads."""
+    if "current_hp" in payload:
+        return payload.get("current_hp")
+    return payload.get("hp")
+
+
 def _md_cell(value: Any) -> str:
     return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ")
 
@@ -272,8 +279,11 @@ class ManualDriver:
                 print(
                     "combat player:",
                     {
-                        k: player.get(k)
-                        for k in ("hp", "max_hp", "block", "energy", "cards_played_this_turn")
+                        "current_hp": _current_hp(player),
+                        "max_hp": player.get("max_hp"),
+                        "block": player.get("block"),
+                        "energy": player.get("energy"),
+                        "cards_played_this_turn": combat.get("cards_played_this_turn"),
                     },
                     flush=True,
                 )
@@ -286,7 +296,7 @@ class ManualDriver:
                         "enemy:",
                         enemy.get("index"),
                         enemy.get("name") or enemy.get("id"),
-                        f"{enemy.get('hp')}/{enemy.get('max_hp')}",
+                        f"{_current_hp(enemy)}/{enemy.get('max_hp')}",
                         "block",
                         enemy.get("block"),
                         "intent",

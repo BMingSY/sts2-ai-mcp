@@ -34,6 +34,14 @@ internal static class DecisionWindowService
         @"\b(?<amount>\d+|X)\s+times?\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    private static readonly Regex ChineseTimesRegex = new(
+        @"(?<amount>\d+|[一二两三四五六七八九十]+)\s*次",
+        RegexOptions.Compiled);
+
+    private static readonly Regex DynamicVarPlaceholderRegex = new(
+        @"\{(?<name>[A-Za-z][A-Za-z0-9_]*):[^}]+\}",
+        RegexOptions.Compiled);
+
     private static readonly Regex ApplyPowerRegex = new(
         @"\b(?:Apply|Gain)\s+(?<amount>\d+)\s+(?<power>[A-Za-z][A-Za-z '\-]+)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -669,20 +677,38 @@ internal static class DecisionWindowService
             notes.Add("Only one Bound card can be played each turn; playing this card blocks the other Bound cards for the rest of the turn.");
         }
 
-        var damageBase = ExtractFirstInt(DealDamageRegex, card.rules_text);
+        var damageVar = ResolveReferencedDynamicVar(card, "Damage", "CalculatedDamage");
+        var parsedDamageBase = ExtractFirstInt(DealDamageRegex, card.rules_text);
+        var damageBase = DynamicVarInt(damageVar, value => value.enchanted_value) ?? parsedDamageBase;
         var hitCount = ResolveHitCount(card, combat.player.energy, combat.player.stars);
         var damageTargets = ResolvePreviewTargets(combat, card, targetIndex);
-        var damagePerHit = damageBase.HasValue
-            ? EstimateCardDamagePerHit(card, combat.player.powers, damageBase.Value, notes)
-            : (int?)null;
+        var damagePerHit = damageVar != null
+            ? DynamicVarInt(damageVar, value => value.preview_value)
+            : damageBase.HasValue
+                ? EstimateCardDamagePerHit(card, combat.player.powers, damageBase.Value, notes)
+                : null;
+        if (damageVar != null)
+        {
+            notes.Add("Used the game's live dynamic-variable preview for card damage.");
+        }
         var targetResults = damagePerHit.HasValue && damageTargets.Length > 0
             ? damageTargets.Select(enemy => BuildDamagePreviewForEnemy(enemy, damagePerHit.Value, hitCount)).ToArray()
             : Array.Empty<object>();
-        var blockBase = ExtractFirstInt(GainBlockRegex, card.rules_text);
-        var blockGain = blockBase.HasValue
-            ? EstimateCardBlockGain(combat.player.powers, blockBase.Value, notes)
-            : (int?)null;
-        var powersApplied = ExtractAppliedPowers(card.rules_text);
+        var blockVar = ResolveReferencedDynamicVar(card, "Block", "CalculatedBlock");
+        var parsedBlockBase = ExtractFirstInt(GainBlockRegex, card.rules_text);
+        var blockBase = DynamicVarInt(blockVar, value => value.enchanted_value) ?? parsedBlockBase;
+        var blockGain = blockVar != null
+            ? DynamicVarInt(blockVar, value => value.preview_value)
+            : blockBase.HasValue
+                ? EstimateCardBlockGain(combat.player.powers, blockBase.Value, notes)
+                : null;
+        if (blockVar != null)
+        {
+            notes.Add("Used the game's live dynamic-variable preview for card Block.");
+        }
+        var powersApplied = MergePowerPreviews(
+            ExtractAppliedPowers(card.rules_text),
+            BuildPowersAppliedFromCombatDynamicVars(card.dynamic_vars));
 
         if (card.costs_x && combat.player.energy == 0)
         {
@@ -939,6 +965,21 @@ internal static class DecisionWindowService
             .ToArray();
     }
 
+    private static object[] BuildPowersAppliedFromCombatDynamicVars(
+        IReadOnlyDictionary<string, CombatCardDynamicVarPayload> vars)
+    {
+        return vars
+            .Where(pair => pair.Key.EndsWith("Power", StringComparison.OrdinalIgnoreCase))
+            .Select(pair => new
+            {
+                power = pair.Key[..^"Power".Length],
+                amount = DecimalToInt(pair.Value.preview_value)
+            })
+            .Where(item => item.amount > 0)
+            .Cast<object>()
+            .ToArray();
+    }
+
     private static string ReadAnonymousString(object item, string propertyName)
     {
         return ReadMemberValue(item, propertyName)?.ToString() ?? string.Empty;
@@ -951,24 +992,98 @@ internal static class DecisionWindowService
 
     private static int ResolveHitCount(CombatHandCardPayload card, int energy, int stars)
     {
-        var match = TimesRegex.Match(card.rules_text ?? string.Empty);
-        if (!match.Success)
+        var repeatVar = ResolveReferencedDynamicVar(card, "Repeat", "Hits", "HitCount");
+        var repeat = DynamicVarInt(repeatVar, value => value.preview_value);
+        if (repeat.HasValue)
         {
-            return 1;
+            return Math.Max(1, repeat.Value);
         }
 
-        var value = match.Groups["amount"].Value;
-        if (value.Equals("X", StringComparison.OrdinalIgnoreCase))
+        var match = TimesRegex.Match(card.rules_text ?? string.Empty);
+        if (match.Success)
         {
-            if (card.star_costs_x)
+            var value = match.Groups["amount"].Value;
+            if (value.Equals("X", StringComparison.OrdinalIgnoreCase))
             {
-                return Math.Max(0, stars);
+                if (card.star_costs_x)
+                {
+                    return Math.Max(0, stars);
+                }
+
+                return Math.Max(0, energy);
             }
 
-            return Math.Max(0, energy);
+            return int.TryParse(value, out var parsed) ? Math.Max(1, parsed) : 1;
         }
 
-        return int.TryParse(value, out var parsed) ? Math.Max(1, parsed) : 1;
+        var chineseMatch = ChineseTimesRegex.Match(card.rules_text ?? string.Empty);
+        if (chineseMatch.Success)
+        {
+            return ParseChineseCount(chineseMatch.Groups["amount"].Value) ?? 1;
+        }
+
+        return 1;
+    }
+
+    private static CombatCardDynamicVarPayload? ResolveReferencedDynamicVar(
+        CombatHandCardPayload card,
+        params string[] fallbackNames)
+    {
+        foreach (Match match in DynamicVarPlaceholderRegex.Matches(card.raw_rules_text ?? string.Empty))
+        {
+            var name = match.Groups["name"].Value;
+            if (fallbackNames.Any(fallback =>
+                    name.Contains(fallback, StringComparison.OrdinalIgnoreCase)) &&
+                card.dynamic_vars.TryGetValue(name, out var referenced))
+            {
+                return referenced;
+            }
+        }
+
+        foreach (var name in fallbackNames)
+        {
+            if (card.dynamic_vars.TryGetValue(name, out var value))
+            {
+                return value;
+            }
+        }
+
+        return null;
+    }
+
+    private static int? DynamicVarInt(
+        CombatCardDynamicVarPayload? value,
+        Func<CombatCardDynamicVarPayload, decimal> selector)
+    {
+        return value == null ? null : DecimalToInt(selector(value));
+    }
+
+    private static int DecimalToInt(decimal value)
+    {
+        return (int)Math.Truncate(value);
+    }
+
+    private static int? ParseChineseCount(string value)
+    {
+        if (int.TryParse(value, out var numeric))
+        {
+            return Math.Max(1, numeric);
+        }
+
+        return value switch
+        {
+            "一" => 1,
+            "二" or "两" => 2,
+            "三" => 3,
+            "四" => 4,
+            "五" => 5,
+            "六" => 6,
+            "七" => 7,
+            "八" => 8,
+            "九" => 9,
+            "十" => 10,
+            _ => null
+        };
     }
 
     private static int? ExtractFirstInt(Regex regex, string? text)

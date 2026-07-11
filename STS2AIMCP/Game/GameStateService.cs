@@ -3920,7 +3920,10 @@ internal static class GameStateService
         var targetSupported = IsCardTargetSupported(card);
         var targetIndexSpace = GetCardTargetIndexSpace(card);
         var validTargetIndices = GetCardTargetIndices(combatState, card);
-        var rulesText = GetCardRulesText(card);
+        var rawRulesText = GetCardRulesText(card);
+        var dynamicVars = BuildCardDynamicVarPayloads(card);
+        var resolvedRulesText = GetResolvedCardRulesText(card);
+        var rulesText = string.IsNullOrWhiteSpace(resolvedRulesText) ? rawRulesText : resolvedRulesText;
         var mods = GetCardModifierTags(card);
         var keywords = GetGlossaryMatches(rulesText, mods);
         var affliction = card.Affliction;
@@ -3943,6 +3946,9 @@ internal static class GameStateService
             energy_cost = card.EnergyCost.GetWithModifiers(CostModifiers.All),
             star_cost = Math.Max(0, card.GetStarCostWithModifiers()),
             rules_text = rulesText,
+            raw_rules_text = rawRulesText,
+            resolved_rules_text = resolvedRulesText,
+            dynamic_vars = dynamicVars,
             keywords = keywords,
             mods = mods,
             affliction_id = affliction?.Id.Entry,
@@ -3954,6 +3960,59 @@ internal static class GameStateService
                 ? GetUnplayableReasonCode(reason)
                 : "unsupported_target_type"
         };
+    }
+
+    private static Dictionary<string, CombatCardDynamicVarPayload> BuildCardDynamicVarPayloads(CardModel card)
+    {
+        var result = new Dictionary<string, CombatCardDynamicVarPayload>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            // PreviewValue is the game-supported display value after player/global hooks such
+            // as Strength, Weak, relics, upgrades, and enchantments. A null target deliberately
+            // keeps enemy-specific state out of this target-agnostic hand snapshot.
+            card.UpdateDynamicVarPreview(CardPreviewMode.Normal, null, card.DynamicVars);
+        }
+        catch
+        {
+            // Base and enchanted values remain useful during short transition windows where the
+            // game cannot calculate a full preview yet.
+        }
+
+        try
+        {
+            foreach (var dynamicVar in card.DynamicVars.Values)
+            {
+                if (string.IsNullOrWhiteSpace(dynamicVar.Name))
+                {
+                    continue;
+                }
+
+                result[dynamicVar.Name] = new CombatCardDynamicVarPayload
+                {
+                    base_value = dynamicVar.BaseValue,
+                    enchanted_value = dynamicVar.EnchantedValue,
+                    preview_value = dynamicVar.PreviewValue
+                };
+            }
+        }
+        catch
+        {
+        }
+
+        return result;
+    }
+
+    private static string GetResolvedCardRulesText(CardModel card)
+    {
+        try
+        {
+            return NormalizeCardRulesText(card.GetDescriptionForPile(PileType.Hand));
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 
     private static CombatEnemyPayload BuildEnemyPayload(Creature enemy, int index)
@@ -6068,6 +6127,13 @@ internal sealed class CombatHandCardPayload
 
     public string rules_text { get; init; } = string.Empty;
 
+    public string raw_rules_text { get; init; } = string.Empty;
+
+    public string resolved_rules_text { get; init; } = string.Empty;
+
+    public Dictionary<string, CombatCardDynamicVarPayload> dynamic_vars { get; init; } =
+        new(StringComparer.OrdinalIgnoreCase);
+
     public string[] keywords { get; init; } = Array.Empty<string>();
 
     public string[] mods { get; init; } = Array.Empty<string>();
@@ -6083,6 +6149,15 @@ internal sealed class CombatHandCardPayload
     public bool playable { get; init; }
 
     public string? unplayable_reason { get; init; }
+}
+
+internal sealed class CombatCardDynamicVarPayload
+{
+    public decimal base_value { get; init; }
+
+    public decimal enchanted_value { get; init; }
+
+    public decimal preview_value { get; init; }
 }
 
 internal sealed class CombatEnemyPayload
