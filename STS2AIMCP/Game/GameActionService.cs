@@ -12,6 +12,7 @@ using MegaCrit.Sts2.Core.DevConsole;
 using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
@@ -71,6 +72,7 @@ internal static class GameActionService
             "choose_reward_card" => ExecuteChooseRewardCardAsync(request),
             "skip_reward_cards" => ExecuteSkipRewardCardsAsync(),
             "select_deck_card" => ExecuteSelectDeckCardAsync(request),
+            "select_card_bundle" => ExecuteSelectCardBundleAsync(request),
             "close_cards_view" => ExecuteCloseCardsViewAsync(),
             "confirm_selection" => ExecuteConfirmSelectionAsync(),
             "proceed" => ExecuteProceedAsync(),
@@ -1166,10 +1168,83 @@ internal static class GameActionService
         };
     }
 
+    private static async Task<ActionResponsePayload> ExecuteSelectCardBundleAsync(ActionRequest request)
+    {
+        var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
+        var screen = GameStateService.ResolveScreen(currentScreen);
+
+        if (currentScreen is not NChooseABundleSelectionScreen bundleScreen ||
+            !GameStateService.CanSelectCardBundle(currentScreen))
+        {
+            throw new ApiException(409, "invalid_action", "Action is not available in the current state.", new
+            {
+                action = "select_card_bundle",
+                screen
+            });
+        }
+
+        if (request.option_index == null)
+        {
+            throw new ApiException(400, "invalid_request", "select_card_bundle requires option_index.", new
+            {
+                action = "select_card_bundle"
+            });
+        }
+
+        var bundles = GameStateService.GetCardBundleOptions(currentScreen);
+        if (request.option_index.Value < 0 || request.option_index.Value >= bundles.Count)
+        {
+            throw new ApiException(409, "invalid_target", "option_index is out of range.", new
+            {
+                action = "select_card_bundle",
+                screen,
+                option_index = request.option_index,
+                option_count = bundles.Count
+            });
+        }
+
+        var bundle = bundles[request.option_index.Value];
+        bundle.EmitSignal(NCardBundle.SignalName.Clicked, bundle);
+        var stable = await WaitForCardBundlePreviewAsync(bundleScreen, bundle, TimeSpan.FromSeconds(10));
+
+        return new ActionResponsePayload
+        {
+            action = "select_card_bundle",
+            status = stable ? "completed" : "pending",
+            stable = stable,
+            message = stable ? "Action completed." : "Action queued but state is still transitioning.",
+            state = GameStateService.BuildStatePayload()
+        };
+    }
+
     private static async Task<ActionResponsePayload> ExecuteConfirmSelectionAsync()
     {
         var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
         var screen = GameStateService.ResolveScreen(currentScreen);
+
+        if (currentScreen is NChooseABundleSelectionScreen bundleScreen)
+        {
+            var bundleConfirmButton = GameStateService.GetCardBundleConfirmButton(currentScreen);
+            if (!GameStateService.CanConfirmSelection(currentScreen) || bundleConfirmButton == null)
+            {
+                throw new ApiException(409, "invalid_action", "Action is not available in the current state.", new
+                {
+                    action = "confirm_selection",
+                    screen
+                });
+            }
+
+            bundleConfirmButton.ForceClick();
+            var bundleStable = await WaitForCardBundleSelectionResolutionAsync(bundleScreen, TimeSpan.FromSeconds(10));
+            return new ActionResponsePayload
+            {
+                action = "confirm_selection",
+                status = bundleStable ? "completed" : "pending",
+                stable = bundleStable,
+                message = bundleStable ? "Action completed." : "Action queued but state is still transitioning.",
+                state = GameStateService.BuildStatePayload()
+            };
+        }
 
         if (!GameStateService.CanConfirmSelection(currentScreen) ||
             !GameStateService.TryGetCombatHandSelection(currentScreen, out var combatHand) ||
@@ -1248,6 +1323,52 @@ internal static class GameActionService
         }
 
         return ActiveScreenContext.Instance.GetCurrentScreen() is not NChooseACardSelectionScreen;
+    }
+
+    private static async Task<bool> WaitForCardBundlePreviewAsync(
+        NChooseABundleSelectionScreen selectionScreen,
+        NCardBundle selectedBundle,
+        TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            await WaitForNextFrameAsync();
+
+            if (!GodotObject.IsInstanceValid(selectionScreen) ||
+                ActiveScreenContext.Instance.GetCurrentScreen() is not NChooseABundleSelectionScreen)
+            {
+                return true;
+            }
+
+            if (ReferenceEquals(GameStateService.GetSelectedCardBundle(selectionScreen), selectedBundle) &&
+                GameStateService.CanConfirmSelection(selectionScreen))
+            {
+                return true;
+            }
+        }
+
+        return ReferenceEquals(GameStateService.GetSelectedCardBundle(selectionScreen), selectedBundle) &&
+            GameStateService.CanConfirmSelection(selectionScreen);
+    }
+
+    private static async Task<bool> WaitForCardBundleSelectionResolutionAsync(
+        NChooseABundleSelectionScreen selectionScreen,
+        TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            await WaitForNextFrameAsync();
+
+            if (!GodotObject.IsInstanceValid(selectionScreen) ||
+                ActiveScreenContext.Instance.GetCurrentScreen() is not NChooseABundleSelectionScreen)
+            {
+                return true;
+            }
+        }
+
+        return ActiveScreenContext.Instance.GetCurrentScreen() is not NChooseABundleSelectionScreen;
     }
 
     private static async Task<bool> WaitForCardsViewCloseAsync(TimeSpan timeout)

@@ -24,6 +24,7 @@ using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Multiplayer.Game.Lobby;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
@@ -360,6 +361,16 @@ internal static class GameStateService
             descriptors.Add(new ActionDescriptor
             {
                 name = "select_deck_card",
+                requires_target = false,
+                requires_index = true
+            });
+        }
+
+        if (CanSelectCardBundle(currentScreen))
+        {
+            descriptors.Add(new ActionDescriptor
+            {
+                name = "select_card_bundle",
                 requires_target = false,
                 requires_index = true
             });
@@ -716,7 +727,53 @@ internal static class GameStateService
 
     public static bool CanSelectDeckCard(IScreenContext? currentScreen)
     {
+        if (currentScreen is NChooseABundleSelectionScreen)
+        {
+            return false;
+        }
+
         return GetDeckSelectionCards(currentScreen).Count > 0;
+    }
+
+    public static bool CanSelectCardBundle(IScreenContext? currentScreen)
+    {
+        return currentScreen is NChooseABundleSelectionScreen &&
+            GetSelectedCardBundle(currentScreen) == null &&
+            GetCardBundleOptions(currentScreen).Count > 0;
+    }
+
+    public static IReadOnlyList<NCardBundle> GetCardBundleOptions(IScreenContext? currentScreen)
+    {
+        if (currentScreen is not NChooseABundleSelectionScreen bundleScreen)
+        {
+            return Array.Empty<NCardBundle>();
+        }
+
+        var bundleRow = bundleScreen.GetNodeOrNull<Control>("%BundleRow");
+        if (bundleRow == null || !GodotObject.IsInstanceValid(bundleRow))
+        {
+            return Array.Empty<NCardBundle>();
+        }
+
+        return bundleRow.GetChildren()
+            .OfType<NCardBundle>()
+            .Where(bundle => GodotObject.IsInstanceValid(bundle) && bundle.Bundle != null)
+            .OrderBy(bundle => bundle.GetIndex())
+            .ToArray();
+    }
+
+    public static NCardBundle? GetSelectedCardBundle(IScreenContext? currentScreen)
+    {
+        return currentScreen is NChooseABundleSelectionScreen bundleScreen
+            ? GetReflectedField(bundleScreen, "_selectedBundle") as NCardBundle
+            : null;
+    }
+
+    public static NConfirmButton? GetCardBundleConfirmButton(IScreenContext? currentScreen)
+    {
+        return currentScreen is NChooseABundleSelectionScreen bundleScreen
+            ? bundleScreen.GetNodeOrNull<NConfirmButton>("%Confirm")
+            : null;
     }
 
     public static bool CanCloseCardsView(IScreenContext? currentScreen)
@@ -726,6 +783,16 @@ internal static class GameStateService
 
     public static bool CanConfirmSelection(IScreenContext? currentScreen)
     {
+        if (currentScreen is NChooseABundleSelectionScreen bundleScreen)
+        {
+            var confirmButton = bundleScreen.GetNodeOrNull<NConfirmButton>("%Confirm");
+            return GetSelectedCardBundle(currentScreen) != null &&
+                confirmButton != null &&
+                GodotObject.IsInstanceValid(confirmButton) &&
+                confirmButton.IsEnabled &&
+                confirmButton.IsVisibleInTree();
+        }
+
         return TryGetCombatHandSelectionMetadata(currentScreen, out _, out var metadata) &&
             metadata.RequiresConfirmation &&
             metadata.CanConfirm;
@@ -1699,6 +1766,11 @@ internal static class GameStateService
             names.Add("select_deck_card");
         }
 
+        if (CanSelectCardBundle(currentScreen))
+        {
+            names.Add("select_card_bundle");
+        }
+
         if (CanCloseCardsView(currentScreen))
         {
             names.Add("close_cards_view");
@@ -2287,7 +2359,12 @@ internal static class GameStateService
             confirm = selection.can_confirm,
             source = selection.source,
             maybe_truncated = selection.maybe_truncated,
-            cards = selection.cards.Select(card => BuildAgentChoiceCardPayload(card.index, card.name, card.upgraded, card.energy_cost, card.star_cost, card.costs_x, card.star_costs_x, card.rules_text, card.keywords, card.mods, glossaryTerms)).ToArray()
+            cards = selection.cards.Select(card => BuildAgentChoiceCardPayload(card.index, card.name, card.upgraded, card.energy_cost, card.star_cost, card.costs_x, card.star_costs_x, card.rules_text, card.keywords, card.mods, glossaryTerms)).ToArray(),
+            bundles = selection.bundles.Select(bundle => new
+            {
+                bundle.index,
+                cards = bundle.cards.Select(card => BuildAgentChoiceCardPayload(card.index, card.name, card.upgraded, card.energy_cost, card.star_cost, card.costs_x, card.star_costs_x, card.rules_text, card.keywords, card.mods, glossaryTerms)).ToArray()
+            }).ToArray()
         };
     }
 
@@ -3273,6 +3350,30 @@ internal static class GameStateService
 
     private static SelectionPayload? BuildSelectionPayload(IScreenContext? currentScreen)
     {
+        if (currentScreen is NChooseABundleSelectionScreen bundleScreen)
+        {
+            var selectedBundle = GetSelectedCardBundle(currentScreen);
+            var bundles = GetCardBundleOptions(currentScreen);
+            return new SelectionPayload
+            {
+                kind = "choose_bundle_select",
+                prompt = bundleScreen.GetNodeOrNull<NCommonBanner>("Banner")?.label.Text ?? "Choose a card bundle",
+                min_select = 1,
+                max_select = 1,
+                selected_count = selectedBundle == null ? 0 : 1,
+                requires_confirmation = true,
+                can_confirm = CanConfirmSelection(currentScreen),
+                source = "bundle_model",
+                maybe_truncated = false,
+                cards = Array.Empty<SelectionCardPayload>(),
+                bundles = bundles.Select((bundle, bundleIndex) => new SelectionBundlePayload
+                {
+                    index = bundleIndex,
+                    cards = bundle.Bundle.Select((card, cardIndex) => BuildSelectionCardPayload(card, cardIndex)).ToArray()
+                }).ToArray()
+            };
+        }
+
         if (!CardSelectionAdapter.TryCreate(currentScreen, out var selection))
         {
             return null;
@@ -4889,6 +4990,7 @@ internal static class GameStateService
         {
             NGameOverScreen => "GAME_OVER",
             NCardRewardSelectionScreen => "REWARD",
+            NChooseABundleSelectionScreen => "CARD_SELECTION",
             NChooseACardSelectionScreen => "CARD_SELECTION",
             NDeckCardSelectScreen or NDeckUpgradeSelectScreen or NDeckTransformSelectScreen or NDeckEnchantSelectScreen => "CARD_SELECTION",
             NCardGridSelectionScreen => "CARD_SELECTION",
@@ -5333,6 +5435,15 @@ internal sealed class SelectionPayload
     public string source { get; init; } = string.Empty;
 
     public bool maybe_truncated { get; init; }
+
+    public SelectionCardPayload[] cards { get; init; } = Array.Empty<SelectionCardPayload>();
+
+    public SelectionBundlePayload[] bundles { get; init; } = Array.Empty<SelectionBundlePayload>();
+}
+
+internal sealed class SelectionBundlePayload
+{
+    public int index { get; init; }
 
     public SelectionCardPayload[] cards { get; init; } = Array.Empty<SelectionCardPayload>();
 }

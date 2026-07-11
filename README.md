@@ -21,6 +21,7 @@ The v2 protocol is experimental but usable for local testing:
 - `POST /v2/decision/wait`
 - `POST /v2/decision/act`
 - `POST /v2/data/lookup`
+- `POST /v2/data/export`
 
 Normal MCP play should use only:
 
@@ -114,6 +115,12 @@ HTTP MCP:
 
 ```bash
 ./scripts/start-mcp-network.sh --host 127.0.0.1 --port 8765 --path /mcp
+```
+
+Static card, monster, power, relic, potion, and event metadata is cached once per game version under `mcp_server/data/versions/`. Pre-generate the running version with:
+
+```bash
+python3 scripts/sync-game-data.py
 ```
 
 ## Validation

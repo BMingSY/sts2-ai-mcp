@@ -12,6 +12,8 @@ internal static class DecisionWindowService
 {
     public const string ProtocolVersion = "2026-07-04-v2-draft";
 
+    private static Dictionary<string, Dictionary<string, Dictionary<string, object?>>>? _modelDbGameDataIndex;
+
     private const int DecisionVersion = 1;
     private const string DefaultProfile = "ai_safe";
     private const string ModVersion = "0.1.0";
@@ -199,6 +201,41 @@ internal static class DecisionWindowService
         return new GameDataLookupPayload
         {
             items = result,
+            metadata = new Dictionary<string, object?>
+            {
+                ["game_version"] = ReleaseInfoManager.Instance.ReleaseInfo?.Version ?? "unknown",
+                ["mod_version"] = ModVersion,
+                ["data_source"] = "loaded_game_model",
+                ["exported_at_utc"] = DateTime.UtcNow.ToString("O"),
+                ["content_hash"] = null
+            }
+        };
+    }
+
+    public static GameDataExportPayload ExportGameData()
+    {
+        var indexes = BuildModelDbGameDataIndex();
+        var collections = new Dictionary<string, Dictionary<string, object?>>(StringComparer.Ordinal);
+
+        foreach (var (collection, index) in indexes.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        {
+            var exported = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var item in index.Values)
+            {
+                if (!item.TryGetValue("id", out var idValue) || string.IsNullOrWhiteSpace(idValue?.ToString()))
+                {
+                    continue;
+                }
+
+                exported[idValue!.ToString()!] = item;
+            }
+
+            collections[collection] = exported;
+        }
+
+        return new GameDataExportPayload
+        {
+            collections = collections,
             metadata = new Dictionary<string, object?>
             {
                 ["game_version"] = ReleaseInfoManager.Instance.ReleaseInfo?.Version ?? "unknown",
@@ -1040,6 +1077,36 @@ internal static class DecisionWindowService
         HashSet<string> actions,
         string phase)
     {
+        if (state.selection != null && actions.Contains("select_card_bundle"))
+        {
+            foreach (var bundle in state.selection.bundles)
+            {
+                var names = string.Join(", ", bundle.cards.Select(card => card.name));
+                var summary = string.Join(" | ", bundle.cards.Select(card =>
+                    $"{card.name}: {BuildCardSummary(card.rules_text, card.keywords, card.mods)}"));
+                choices.Add(IndexChoice(
+                    $"{phase}:select_card_bundle:{bundle.index}",
+                    "select_card_bundle",
+                    $"Select card bundle {bundle.index + 1}: {names}",
+                    summary,
+                    "select_card_bundle",
+                    state.screen,
+                    optionIndex: bundle.index,
+                    sourceExtra: new Dictionary<string, object?>
+                    {
+                        ["bundle_index"] = bundle.index,
+                        ["cards"] = bundle.cards.Select(card => new
+                        {
+                            card.card_id,
+                            card.name,
+                            card.rules_text,
+                            card.keywords,
+                            card.mods
+                        }).ToArray()
+                    }));
+            }
+        }
+
         if (state.selection != null && actions.Contains("select_deck_card"))
         {
             foreach (var card in state.selection.cards)
@@ -2627,9 +2694,18 @@ internal static class DecisionWindowService
 
     private static Dictionary<string, Dictionary<string, Dictionary<string, object?>>> BuildGameDataIndex(GameStatePayload state)
     {
-        var indexes = BuildModelDbGameDataIndex();
+        var indexes = CloneIndexes(BuildModelDbGameDataIndex());
         MergeIndexes(indexes, BuildVisibleGameDataIndex(state));
         return indexes;
+    }
+
+    private static Dictionary<string, Dictionary<string, Dictionary<string, object?>>> CloneIndexes(
+        Dictionary<string, Dictionary<string, Dictionary<string, object?>>> source)
+    {
+        return source.ToDictionary(
+            pair => pair.Key,
+            pair => new Dictionary<string, Dictionary<string, object?>>(pair.Value, StringComparer.Ordinal),
+            StringComparer.OrdinalIgnoreCase);
     }
 
     private static void MergeIndexes(
@@ -2653,6 +2729,11 @@ internal static class DecisionWindowService
 
     private static Dictionary<string, Dictionary<string, Dictionary<string, object?>>> BuildModelDbGameDataIndex()
     {
+        if (_modelDbGameDataIndex != null)
+        {
+            return _modelDbGameDataIndex;
+        }
+
         var indexes = new Dictionary<string, Dictionary<string, Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase);
 
         AddModelCollection("cards", "AllCards");
@@ -2661,9 +2742,11 @@ internal static class DecisionWindowService
         AddModelCollection("potions", "AllPotions");
         AddModelCollection("events", "AllEvents");
         AddModelCollection("events", "AllAncients");
+        AddModelCollection("powers", "AllPowers");
         AddCorePowerData(indexes);
 
-        return indexes;
+        _modelDbGameDataIndex = indexes;
+        return _modelDbGameDataIndex;
 
         void AddModelCollection(string collection, string propertyName)
         {
@@ -2739,6 +2822,10 @@ internal static class DecisionWindowService
                 break;
             case "events":
                 item["event_type"] = model.GetType().Name;
+                break;
+            case "powers":
+                item["type"] = ReadModelValue(model, "Type")?.ToString();
+                item["stack_type"] = ReadModelValue(model, "StackType")?.ToString();
                 break;
         }
 
@@ -2850,7 +2937,13 @@ internal static class DecisionWindowService
             PowerItem("THORNS", "Thorns", "Deals damage back to attackers when hit.", "Buff")
         })
         {
-            AddIndexedItem(indexes, "powers", item["id"]?.ToString(), item);
+            var id = item["id"]?.ToString();
+            if (string.IsNullOrWhiteSpace(id) ||
+                !indexes.TryGetValue("powers", out var powerIndex) ||
+                !TryGetIndexedItem(powerIndex, id, out _))
+            {
+                AddIndexedItem(indexes, "powers", id, item);
+            }
         }
 
         static Dictionary<string, object?> PowerItem(string id, string name, string description, string type)
@@ -4007,6 +4100,13 @@ internal sealed class GameDataLookupItemRequest
 internal sealed class GameDataLookupPayload
 {
     public Dictionary<string, object?> items { get; init; } = new();
+
+    public Dictionary<string, object?> metadata { get; init; } = new();
+}
+
+internal sealed class GameDataExportPayload
+{
+    public Dictionary<string, Dictionary<string, object?>> collections { get; init; } = new();
 
     public Dictionary<string, object?> metadata { get; init; } = new();
 }

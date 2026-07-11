@@ -156,6 +156,14 @@ class Sts2Client:
             },
         )
 
+    def export_game_data(self) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/v2/data/export",
+            payload={},
+            max_retries=0,
+        )
+
     def iter_events(
         self,
         *,
@@ -685,6 +693,7 @@ class Sts2Client:
         payload: dict[str, Any] | None = None,
         *,
         is_action: bool = False,
+        max_retries: int | None = None,
     ) -> dict[str, Any]:
         timeout = self._action_timeout if is_action else self._read_timeout
         raw_payload = None
@@ -697,12 +706,13 @@ class Sts2Client:
             headers["Content-Type"] = "application/json; charset=utf-8"
 
         last_error: Sts2ApiError | None = None
-        attempts = 1 + self._max_retries
+        retry_count = self._max_retries if max_retries is None else max(0, max_retries)
+        attempts = 1 + retry_count
 
         for attempt in range(attempts):
             if attempt > 0:
                 delay = _RETRY_BACKOFF_BASE * (2 ** (attempt - 1))
-                logger.info("Retry %d/%d for %s %s in %.1fs", attempt, self._max_retries, method, path, delay)
+                logger.info("Retry %d/%d for %s %s in %.1fs", attempt, retry_count, method, path, delay)
                 time.sleep(delay)
 
             http_request = request.Request(
@@ -717,7 +727,7 @@ class Sts2Client:
                     return self._decode_success(response.read())
             except error.HTTPError as exc:
                 last_error = self._build_api_error(exc.code, exc.read())
-                if not last_error.retryable or attempt >= self._max_retries:
+                if not last_error.retryable or attempt >= retry_count:
                     raise last_error
             except error.URLError as exc:
                 last_error = Sts2ApiError(
@@ -730,7 +740,7 @@ class Sts2Client:
                     details={"reason": str(exc.reason), "path": path},
                     retryable=True,
                 )
-                if attempt >= self._max_retries:
+                if attempt >= retry_count:
                     raise last_error
 
         raise last_error or AssertionError("unreachable")

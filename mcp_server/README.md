@@ -30,9 +30,17 @@ uv run sts2-network-mcp-server --host 127.0.0.1 --port 8765 --path /mcp
 
 ## Game Data
 
-`lookup_game_data` prefers the running game's `/v2/data/lookup` endpoint.
+`lookup_game_data` uses a versioned local snapshot under `mcp_server/data/versions/<game_version>/`.
 
-Checked-in `mcp_server/data/eng` cache data is intentionally not required in this public repository. If you generate or add a local cache, keep its game version and content hash tied to the running game build.
+On the first lookup for a new game version, MCP calls the running Mod's `/v2/data/export` endpoint once, saves all static collections, and serves subsequent lookups locally. Decision tools request live state without game-side knowledge expansion and hydrate relevant cards, monsters, powers, relics, potions, and events from the same snapshot.
+
+To pre-generate a version explicitly:
+
+```bash
+python3 ../scripts/sync-game-data.py
+```
+
+Use `STS2_GAME_DATA_DIR` to override the snapshot root. Generated game data is not checked in by default.
 
 ## Tests
 

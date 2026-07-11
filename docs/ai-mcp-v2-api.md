@@ -390,6 +390,23 @@ Lookup game data directly.
 }
 ```
 
+The MCP wrapper serves this lookup from a versioned local snapshot. The direct Mod endpoint remains available for diagnostics and compatibility.
+
+## `POST /v2/data/export`
+
+Export all static ModelDb collections once for the running game version. MCP stores the response under `mcp_server/data/versions/<game_version>/` and does not call this endpoint again while a valid snapshot exists.
+
+Collections:
+
+- `cards`
+- `monsters`
+- `powers`
+- `relics`
+- `potions`
+- `events`
+
+The export metadata includes `game_version`, `mod_version`, `exported_at_utc`, and a content hash added by the MCP cache writer.
+
 ---
 
 ## Knowledge Metadata
@@ -415,8 +432,9 @@ Decision payloads and lookup responses should include data freshness metadata wh
 
 | Value | Meaning |
 | --- | --- |
-| `loaded_game_model` | Exported from the currently running game process; preferred |
-| `mcp_cache` | Served from MCP cache generated from a previous export |
+| `loaded_game_model` | Exported from the currently running game process |
+| `mcp_versioned_cache` | Served from the snapshot matching the running game version; preferred for static data |
+| `mcp_cache` | Legacy MCP cache generated from a previous export |
 | `checked_in_cache` | Served from repository data files; must be treated as potentially stale after game updates |
 
 If the loaded game version and cached data version differ, the server should mark cached data as stale or omit it from `knowledge.relevant` and require explicit lookup.

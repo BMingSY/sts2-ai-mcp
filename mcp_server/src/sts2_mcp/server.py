@@ -14,6 +14,7 @@ from typing_extensions import NotRequired, TypedDict
 from fastmcp import FastMCP
 
 from .client import Sts2ApiError, Sts2Client
+from .game_data import GameDataSnapshot, GameDataVersionError, VersionedGameDataStore
 from .handoff import Sts2HandoffService
 from .knowledge import Sts2KnowledgeBase
 
@@ -144,6 +145,26 @@ _SCENE_FIELD_SETS: dict[str, dict[str, list[str]]] = {
             "options",
         ],
     },
+}
+
+_RELEVANT_ID_COLLECTIONS = {
+    "card_id": "cards",
+    "enemy_id": "monsters",
+    "monster_id": "monsters",
+    "power_id": "powers",
+    "relic_id": "relics",
+    "potion_id": "potions",
+    "event_id": "events",
+}
+
+_CORE_GLOSSARY = {
+    "Strength": "Adds to attack damage.",
+    "Weak": "Attack damage dealt is reduced by 25%.",
+    "Vulnerable": "Attack damage received is increased by 50%.",
+    "Dexterity": "Adds to Block gained from cards before multiplicative modifiers.",
+    "Frail": "Block gained from cards is reduced by 25%.",
+    "Block": "Block absorbs damage before HP loss.",
+    "Eternal": "Card cannot be removed from the deck.",
 }
 
 
@@ -672,12 +693,103 @@ def _register_legacy_action_tools(mcp: FastMCP, sts2: Sts2Client) -> None:
 
 def create_server(client: Sts2Client | None = None, tool_profile: str | None = None) -> FastMCP:
     sts2 = client or Sts2Client()
+    versioned_game_data = VersionedGameDataStore()
     knowledge = Sts2KnowledgeBase()
     handoff = Sts2HandoffService(knowledge)
     profile = _normalize_tool_profile(tool_profile)
     mcp = FastMCP("STS2 AI MCP")
     decision_cache: dict[str, dict[str, Any]] = {}
     plan_result_cache: dict[str, tuple[str, dict[str, Any]]] = {}
+    active_snapshot: GameDataSnapshot | None = None
+    snapshot_lock = threading.Lock()
+
+    def _get_versioned_snapshot() -> GameDataSnapshot:
+        nonlocal active_snapshot
+        health = sts2.get_health()
+        game_version = str(health.get("game_version", "")).strip()
+        mod_version = str(health.get("mod_version", "")).strip()
+        if not game_version:
+            raise GameDataVersionError("The running game did not report game_version.")
+        if (
+            active_snapshot is not None
+            and active_snapshot.game_version == game_version
+            and (not mod_version or active_snapshot.manifest.get("mod_version") == mod_version)
+        ):
+            return active_snapshot
+
+        with snapshot_lock:
+            if (
+                active_snapshot is not None
+                and active_snapshot.game_version == game_version
+                and (not mod_version or active_snapshot.manifest.get("mod_version") == mod_version)
+            ):
+                return active_snapshot
+
+            try:
+                active_snapshot = versioned_game_data.load(game_version)
+            except GameDataVersionError:
+                exported = sts2.export_game_data()
+                active_snapshot = versioned_game_data.save_export(exported)
+
+            if mod_version and active_snapshot.manifest.get("mod_version") != mod_version:
+                exported = sts2.export_game_data()
+                active_snapshot = versioned_game_data.save_export(exported)
+
+            if active_snapshot.game_version != game_version:
+                raise GameDataVersionError(
+                    f"Active snapshot version {active_snapshot.game_version!r} does not match {game_version!r}."
+                )
+            return active_snapshot
+
+    def _collect_relevant_ids(value: Any, result: dict[str, set[str]]) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                collection = _RELEVANT_ID_COLLECTIONS.get(str(key))
+                if collection and isinstance(nested, str) and nested.strip():
+                    result.setdefault(collection, set()).add(nested.strip())
+                _collect_relevant_ids(nested, result)
+        elif isinstance(value, list):
+            for nested in value:
+                _collect_relevant_ids(nested, result)
+
+    def _hydrate_decision_knowledge(decision: dict[str, Any]) -> dict[str, Any]:
+        try:
+            snapshot = _get_versioned_snapshot()
+        except (AttributeError, GameDataVersionError, Sts2ApiError, RuntimeError, TypeError):
+            return decision
+
+        requested: dict[str, set[str]] = {}
+        _collect_relevant_ids(decision.get("context"), requested)
+        _collect_relevant_ids(decision.get("summary"), requested)
+        _collect_relevant_ids(decision.get("choices"), requested)
+        scene = _detect_scene_from_screen(str(decision.get("screen", "")))
+        relevant: dict[str, Any] = {"glossary": _CORE_GLOSSARY}
+        for collection, ids in sorted(requested.items()):
+            fields = _SCENE_FIELD_SETS.get(scene, {}).get(collection)
+            lookup = snapshot.lookup(
+                [{"collection": collection, "id": item_id} for item_id in sorted(ids)],
+                fields=fields,
+            )
+            values = {
+                key.removeprefix(f"{collection}:"): value
+                for key, value in lookup["items"].items()
+                if value is not None
+            }
+            if values:
+                relevant[collection] = values
+
+        decision["knowledge"] = {
+            "metadata": {
+                "schema_version": snapshot.manifest.get("schema_version"),
+                "game_version": snapshot.game_version,
+                "mod_version": snapshot.manifest.get("mod_version"),
+                "data_source": "mcp_versioned_cache",
+                "exported_at_utc": snapshot.manifest.get("exported_at_utc"),
+                "content_hash": snapshot.manifest.get("content_hash"),
+            },
+            "relevant": relevant,
+        }
+        return decision
 
     def _agent_state() -> dict[str, Any]:
         state = sts2.get_state()
@@ -761,15 +873,18 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
             "source": source,
         }
 
-    def _cache_decision(payload: dict[str, Any]) -> dict[str, Any]:
+    def _cache_decision(payload: dict[str, Any], *, include_relevant: bool = True) -> dict[str, Any]:
         decision = payload.get("decision")
         if isinstance(decision, dict) and isinstance(decision.get("decision_id"), str):
+            if include_relevant:
+                _hydrate_decision_knowledge(decision)
             decision_cache[decision["decision_id"]] = decision
         return payload
 
     def _cache_next_decision(result: dict[str, Any]) -> dict[str, Any] | None:
         decision = result.get("next_decision")
         if isinstance(decision, dict) and isinstance(decision.get("decision_id"), str):
+            _hydrate_decision_knowledge(decision)
             decision_cache[decision["decision_id"]] = decision
             return decision
         return None
@@ -785,7 +900,8 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
                     profile="ai_safe",
                     include_raw_state=False,
                     include_relevant_game_data=False,
-                )
+                ),
+                include_relevant=False,
             )
         except Sts2ApiError:
             return None
@@ -1153,8 +1269,9 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
                 sts2.get_current_decision(
                     profile="ai_safe",
                     include_raw_state=include_raw_state,
-                    include_relevant_game_data=include_relevant_game_data,
-                )
+                    include_relevant_game_data=False,
+                ),
+                include_relevant=include_relevant_game_data,
             )
 
         @mcp.tool
@@ -1170,9 +1287,10 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
                     timeout_ms=timeout_ms,
                     profile="ai_safe",
                     include_raw_state=include_raw_state,
-                    include_relevant_game_data=include_relevant_game_data,
+                    include_relevant_game_data=False,
                     after_decision_id=after_decision_id,
-                )
+                ),
+                include_relevant=include_relevant_game_data,
             )
 
         @mcp.tool
@@ -1257,10 +1375,10 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
 
         @mcp.tool
         def lookup_game_data(items: list[dict[str, Any]], fields: list[str] | None = None) -> dict[str, Any]:
-            """Lookup game metadata by collection/id pairs, preferring the live v2 Mod API."""
+            """Lookup game metadata from the versioned local snapshot for the running game build."""
             try:
-                return sts2.lookup_game_data(items=items, fields=fields)
-            except (AttributeError, Sts2ApiError, KeyError, RuntimeError, TypeError) as exc:
+                return _get_versioned_snapshot().lookup(items=items, fields=fields)
+            except (AttributeError, GameDataVersionError, Sts2ApiError, KeyError, RuntimeError, TypeError) as exc:
                 try:
                     return {
                         "items": _lookup_game_data(items=items, fields=fields),

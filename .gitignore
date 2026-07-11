@@ -34,6 +34,7 @@ dist/
 # Optional generated game data cache.
 # Keep this private unless its source and license are explicitly reviewed.
 mcp_server/data/eng/
+mcp_server/data/versions/
 
 # Editor/OS
 .DS_Store

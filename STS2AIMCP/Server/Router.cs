@@ -70,7 +70,8 @@ internal static class Router
                                 "/v2/decision/current",
                                 "/v2/decision/wait",
                                 "/v2/decision/act",
-                                "/v2/data/lookup"
+                                "/v2/data/lookup",
+                                "/v2/data/export"
                             }
                         }
                     }
@@ -177,6 +178,20 @@ internal static class Router
                 var lookupRequest = await JsonHelper.DeserializeAsync<GameDataLookupRequest>(request.InputStream, cancellationToken)
                     ?? new GameDataLookupRequest();
                 var payload = await GameThread.InvokeAsync(() => DecisionWindowService.LookupGameData(lookupRequest));
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = payload
+                });
+                statusCode = 200;
+                return;
+            }
+
+            if (request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/v2/data/export")
+            {
+                var payload = await GameThread.InvokeAsync(DecisionWindowService.ExportGameData);
                 await WriteJsonAsync(response, 200, new
                 {
                     ok = true,

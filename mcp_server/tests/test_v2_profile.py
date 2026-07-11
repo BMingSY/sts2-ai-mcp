@@ -47,6 +47,46 @@ class DummyV2Client:
         }
 
 
+class VersionedDataClient(DummyV2Client):
+    def __init__(self) -> None:
+        super().__init__()
+        self.export_calls = 0
+        self.current_kwargs: dict = {}
+
+    def get_health(self) -> dict:
+        return {"game_version": "v-test.1", "mod_version": "0.1.0"}
+
+    def export_game_data(self) -> dict:
+        self.export_calls += 1
+        return {
+            "collections": {
+                "cards": {
+                    "BASH": {"id": "BASH", "name": "Bash", "description": "Apply Vulnerable.", "cost": 2}
+                },
+                "monsters": {},
+                "powers": {},
+                "relics": {},
+                "potions": {},
+                "events": {},
+            },
+            "metadata": {
+                "game_version": "v-test.1",
+                "mod_version": "0.1.0",
+                "exported_at_utc": "2026-07-11T00:00:00Z",
+            },
+        }
+
+    def get_current_decision(self, **kwargs) -> dict:
+        self.current_kwargs = kwargs
+        return {
+            "available": True,
+            "decision": {
+                **self.current_decision["decision"],
+                "context": {"combat": {"hand": [{"card_id": "BASH"}]}},
+            },
+        }
+
+
 def _choice(action_id: str, kind: str, **source: object) -> dict:
     return {
         "action_id": action_id,
@@ -200,6 +240,32 @@ class V2ProfileTests(unittest.TestCase):
             )
 
         self.assertEqual(result["items"]["cards:abrasive"], {"id": "ABRASIVE", "name": "Abrasive"})
+
+    def test_lookup_game_data_exports_once_then_uses_versioned_local_snapshot(self) -> None:
+        client = VersionedDataClient()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"STS2_GAME_DATA_DIR": tmpdir}):
+                server = create_server(client=client, tool_profile="ai_safe_v2")
+                lookup = asyncio.run(server.get_tool("lookup_game_data"))
+                first = lookup.fn(items=[{"collection": "cards", "id": "BASH"}], fields=["id", "name"])
+                second = lookup.fn(items=[{"collection": "cards", "id": "bash"}], fields=["cost"])
+
+        self.assertEqual(first["items"]["cards:BASH"], {"id": "BASH", "name": "Bash"})
+        self.assertEqual(second["items"]["cards:bash"], {"cost": 2})
+        self.assertEqual(first["metadata"]["data_source"], "mcp_versioned_cache")
+        self.assertEqual(client.export_calls, 1)
+
+    def test_current_decision_uses_local_knowledge_without_live_hydration(self) -> None:
+        client = VersionedDataClient()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"STS2_GAME_DATA_DIR": tmpdir}):
+                server = create_server(client=client, tool_profile="ai_safe_v2")
+                current = asyncio.run(server.get_tool("get_current_decision"))
+                result = current.fn(include_relevant_game_data=True)
+
+        self.assertFalse(client.current_kwargs["include_relevant_game_data"])
+        self.assertEqual(result["decision"]["knowledge"]["metadata"]["data_source"], "mcp_versioned_cache")
+        self.assertEqual(result["decision"]["knowledge"]["relevant"]["cards"]["BASH"]["name"], "Bash")
 
     def test_select_cards_executes_each_fresh_decision_then_confirms(self) -> None:
         decisions = [
