@@ -321,7 +321,12 @@ Choices:
 
 ### Event
 
-`context.event` should include event id/title/description and options.
+`context.event` should include event id/title/description, resolved event-level
+`dynamic_vars`, and options. Each option should expose its resolved title and
+description, the original `raw_title` / `raw_description` localization templates,
+the subset of `dynamic_vars` referenced by those templates, and a structured
+`relic_preview` when the option's hover tips identify a relic. `estimated_effects`
+must prefer these structured values over localized text parsing.
 
 Choices:
 

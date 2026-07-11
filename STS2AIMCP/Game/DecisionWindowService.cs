@@ -2162,17 +2162,22 @@ internal static class DecisionWindowService
             eventPayload.title,
             eventPayload.description,
             eventPayload.is_finished,
+            eventPayload.dynamic_vars,
             options = eventPayload.options.Select(option => new
             {
                 option.index,
                 option.text_key,
                 option.title,
                 option.description,
+                option.raw_title,
+                option.raw_description,
+                option.dynamic_vars,
                 option.is_locked,
                 option.is_proceed,
                 option.will_kill_player,
                 option.has_relic_preview,
-                estimated_effects = BuildTextEffectPreview($"{option.title} {option.description}", option.will_kill_player)
+                option.relic_preview,
+                estimated_effects = BuildEventEffectPreview(option)
             }).ToArray()
         };
     }
@@ -2334,22 +2339,75 @@ internal static class DecisionWindowService
         };
     }
 
-    private static object BuildTextEffectPreview(string text, bool willKillPlayer)
+    private static object BuildEventEffectPreview(EventOptionPayload option)
     {
+        var text = $"{option.title} {option.description}";
+        var hpLoss = ReadDynamicVarInt(option.dynamic_vars, "HpLoss") ??
+            ExtractFirstNumberNearLocalized(text, ("Lose", "HP"), ("失去", "生命"));
+        var gold = ReadDynamicVarInt(option.dynamic_vars, "Gold");
+        var maxHpLoss = ReadDynamicVarInt(option.dynamic_vars, "MaxHpLoss");
+        var relicName = option.relic_preview?.name ?? ReadDynamicVarString(option.dynamic_vars, "Relic");
+        var gainsGold = ContainsOrderedTerms(text, ("Gain", "Gold"), ("获得", "金币"));
+        var losesGold = ContainsOrderedTerms(text, ("Lose", "Gold"), ("失去", "金币"));
+
         return new
         {
-            hp_loss = ExtractFirstNumberNear(text, "Lose", "HP"),
-            max_hp_loss = ContainsAny(text, "Max HP") ? ExtractFirstNumberNear(text, "Lose") : null,
-            gold_gain = ExtractFirstNumberNear(text, "Gain", "Gold"),
-            gold_loss = ExtractFirstNumberNear(text, "Lose", "Gold"),
-            adds_curse_or_affliction = ContainsAny(text, "Curse", "Affliction"),
-            removes_card = ContainsAny(text, "Remove"),
-            transforms_card = ContainsAny(text, "Transform"),
-            upgrades_card = ContainsAny(text, "Upgrade"),
-            grants_relic = ContainsAny(text, "Relic"),
-            grants_potion = ContainsAny(text, "Potion"),
-            will_kill_player = willKillPlayer
+            hp_loss = hpLoss,
+            max_hp_loss = maxHpLoss,
+            gold_gain = gainsGold ? gold : null,
+            gold_loss = losesGold ? gold : null,
+            relic_name = relicName,
+            adds_curse_or_affliction = ContainsAny(text, "Curse", "Affliction", "诅咒", "异变"),
+            removes_card = ContainsAny(text, "Remove", "移除"),
+            transforms_card = ContainsAny(text, "Transform", "转化"),
+            upgrades_card = ContainsAny(text, "Upgrade", "升级"),
+            grants_relic = option.relic_preview != null || relicName != null || ContainsAny(text, "Relic", "遗物"),
+            grants_potion = ContainsAny(text, "Potion", "药水"),
+            will_kill_player = option.will_kill_player
         };
+    }
+
+    private static string? ReadDynamicVarString(IReadOnlyDictionary<string, object?> vars, string key)
+    {
+        return vars.TryGetValue(key, out var value) ? value?.ToString() : null;
+    }
+
+    private static int? ExtractFirstNumberNearLocalized(
+        string text,
+        params (string first, string second)[] requiredTermPairs)
+    {
+        foreach (var (first, second) in requiredTermPairs)
+        {
+            if (ContainsAny(text, first) && ContainsAny(text, second))
+            {
+                var match = Regex.Match(text, @"\d+");
+                if (match.Success && int.TryParse(match.Value, out var value))
+                {
+                    return value;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static bool ContainsOrderedTerms(
+        string text,
+        params (string first, string second)[] requiredTermPairs)
+    {
+        foreach (var (first, second) in requiredTermPairs)
+        {
+            var firstIndex = text.IndexOf(first, StringComparison.OrdinalIgnoreCase);
+            var secondIndex = firstIndex < 0
+                ? -1
+                : text.IndexOf(second, firstIndex + first.Length, StringComparison.OrdinalIgnoreCase);
+            if (firstIndex >= 0 && secondIndex >= 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static int? ExtractFirstNumberNear(string text, params string[] requiredTerms)

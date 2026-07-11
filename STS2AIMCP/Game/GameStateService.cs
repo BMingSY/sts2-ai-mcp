@@ -20,6 +20,8 @@ using MegaCrit.Sts2.Core.Models.Characters;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.Logging;
+using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Multiplayer.Game.Lobby;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
@@ -53,7 +55,7 @@ namespace STS2AIMCP.Game;
 
 internal static class GameStateService
 {
-    private const int StateVersion = 8;
+    private const int StateVersion = 9;
     private const int AgentViewVersion = 1;
     private const int MaxCombatPileStacks = 120;
 
@@ -3477,6 +3479,18 @@ internal static class GameStateService
                 return null;
             }
 
+            var dynamicVars = BuildEventDynamicVars(eventModel);
+            var eventTitle = eventModel.Title;
+            var eventDescription = eventModel.Description;
+            eventModel.DynamicVars.AddTo(eventTitle);
+            if (eventDescription != null)
+            {
+                eventModel.Owner?.Character.AddDetailsTo(eventDescription);
+                eventDescription.Add(
+                    "IsMultiplayer",
+                    eventModel.Owner != null && eventModel.Owner.RunState.Players.Count > 1);
+                eventModel.DynamicVars.AddTo(eventDescription);
+            }
             var options = new List<EventOptionPayload>();
 
             if (eventModel.IsFinished)
@@ -3498,16 +3512,30 @@ internal static class GameStateService
                 for (int i = 0; i < currentOptions.Count; i++)
                 {
                     var opt = currentOptions[i];
+                    var rawTitle = SafeReadString(() => opt.Title?.GetRawText());
+                    var rawDescription = SafeReadString(() => opt.Description?.GetRawText());
+                    eventModel.DynamicVars.AddTo(opt.Title);
+                    eventModel.DynamicVars.AddTo(opt.Description);
+                    var optionDynamicVars = SelectReferencedEventDynamicVars(
+                        dynamicVars,
+                        $"{rawTitle} {rawDescription}",
+                        opt.Title,
+                        opt.Description);
+                    var relicPreview = BuildEventRelicPreview(opt);
                     options.Add(new EventOptionPayload
                     {
                         index = i,
                         text_key = SafeReadString(() => opt.TextKey),
                         title = SafeReadString(() => opt.Title?.GetFormattedText()),
                         description = SafeReadString(() => opt.Description?.GetFormattedText()),
+                        raw_title = rawTitle,
+                        raw_description = rawDescription,
+                        dynamic_vars = optionDynamicVars,
                         is_locked = SafeReadBool(() => opt.IsLocked),
                         is_proceed = SafeReadBool(() => opt.IsProceed),
                         will_kill_player = GetEventOptionWillKillPlayer(eventModel, opt),
-                        has_relic_preview = GetReflectedProperty(opt, "Relic") != null
+                        has_relic_preview = relicPreview != null,
+                        relic_preview = relicPreview
                     });
                 }
             }
@@ -3515,9 +3543,10 @@ internal static class GameStateService
             return new EventPayload
             {
                 event_id = SafeReadString(() => eventModel.Id?.Entry, "unknown"),
-                title = SafeReadString(() => eventModel.Title?.GetFormattedText()),
-                description = SafeReadString(() => eventModel.Description?.GetFormattedText()),
+                title = SafeReadString(() => eventTitle.GetFormattedText()),
+                description = SafeReadString(() => eventDescription?.GetFormattedText()),
                 is_finished = SafeReadBool(() => eventModel.IsFinished),
+                dynamic_vars = dynamicVars,
                 options = options.ToArray()
             };
         }
@@ -3526,6 +3555,108 @@ internal static class GameStateService
             Log.Warn($"[STS2AIMCP] Failed to build event payload on screen {currentScreen.GetType().FullName}: {ex}");
             return null;
         }
+    }
+
+    private static Dictionary<string, object?> BuildEventDynamicVars(EventModel eventModel)
+    {
+        return eventModel.DynamicVars.ToDictionary(
+            pair => pair.Key,
+            pair => NormalizeEventDynamicVarValue(pair.Value),
+            StringComparer.Ordinal);
+    }
+
+    private static object? NormalizeEventDynamicVarValue(DynamicVar dynamicVar)
+    {
+        if (dynamicVar is StringVar stringVar)
+        {
+            return stringVar.StringValue;
+        }
+
+        var value = dynamicVar.BaseValue;
+        if (decimal.Truncate(value) == value)
+        {
+            if (value >= int.MinValue && value <= int.MaxValue)
+            {
+                return (int)value;
+            }
+
+            if (value >= long.MinValue && value <= long.MaxValue)
+            {
+                return (long)value;
+            }
+        }
+
+        return value;
+    }
+
+    private static Dictionary<string, object?> SelectReferencedEventDynamicVars(
+        IReadOnlyDictionary<string, object?> dynamicVars,
+        string rawText,
+        params LocString[] locStrings)
+    {
+        var result = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (Match match in Regex.Matches(rawText, @"\{(?<name>[A-Za-z_][A-Za-z0-9_]*)"))
+        {
+            var name = match.Groups["name"].Value;
+            object? value = null;
+            var found = false;
+            foreach (var locString in locStrings)
+            {
+                if (locString.Variables.TryGetValue(name, out var locValue))
+                {
+                    value = NormalizeEventVariableValue(locValue);
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found && dynamicVars.TryGetValue(name, out var eventValue))
+            {
+                value = eventValue;
+                found = true;
+            }
+
+            if (found)
+            {
+                result[name] = value;
+            }
+        }
+
+        return result;
+    }
+
+    private static object? NormalizeEventVariableValue(object? value)
+    {
+        return value switch
+        {
+            null => null,
+            DynamicVar dynamicVar => NormalizeEventDynamicVarValue(dynamicVar),
+            LocString locString => locString.GetFormattedText(),
+            string or bool or byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal => value,
+            IEnumerable<string> strings => strings.ToArray(),
+            Enum enumValue => enumValue.ToString(),
+            _ => value.ToString()
+        };
+    }
+
+    private static EventRelicPreviewPayload? BuildEventRelicPreview(EventOption option)
+    {
+        var relic = option.Relic ?? option.HoverTips
+            .Select(hoverTip => hoverTip.CanonicalModel)
+            .OfType<RelicModel>()
+            .FirstOrDefault();
+        if (relic == null)
+        {
+            return null;
+        }
+
+        return new EventRelicPreviewPayload
+        {
+            relic_id = relic.Id.Entry,
+            name = relic.Title.GetFormattedText(),
+            description = GetDynamicFormattedTextProperty(relic, "DynamicDescription", "Description"),
+            rarity = relic.Rarity.ToString()
+        };
     }
 
     private static RestPayload? BuildRestPayload(IScreenContext? currentScreen)
@@ -5582,6 +5713,8 @@ internal sealed class EventPayload
 
     public bool is_finished { get; init; }
 
+    public Dictionary<string, object?> dynamic_vars { get; init; } = new(StringComparer.Ordinal);
+
     public EventOptionPayload[] options { get; init; } = Array.Empty<EventOptionPayload>();
 }
 
@@ -5595,6 +5728,12 @@ internal sealed class EventOptionPayload
 
     public string description { get; init; } = string.Empty;
 
+    public string raw_title { get; init; } = string.Empty;
+
+    public string raw_description { get; init; } = string.Empty;
+
+    public Dictionary<string, object?> dynamic_vars { get; init; } = new(StringComparer.Ordinal);
+
     public bool is_locked { get; init; }
 
     public bool is_proceed { get; init; }
@@ -5602,6 +5741,19 @@ internal sealed class EventOptionPayload
     public bool will_kill_player { get; init; }
 
     public bool has_relic_preview { get; init; }
+
+    public EventRelicPreviewPayload? relic_preview { get; init; }
+}
+
+internal sealed class EventRelicPreviewPayload
+{
+    public string relic_id { get; init; } = string.Empty;
+
+    public string name { get; init; } = string.Empty;
+
+    public string? description { get; init; }
+
+    public string rarity { get; init; } = string.Empty;
 }
 
 internal sealed class RestPayload
