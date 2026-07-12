@@ -3,5 +3,5 @@
   "name": "STS2 AI MCP",
   "author": "BMingSY",
   "description": "Local HTTP API bridge for Slay the Spire 2 AI and MCP clients.",
-  "version": "0.1.0"
+  "version": "0.1.1"
 }

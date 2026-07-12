@@ -16,7 +16,7 @@ internal static class DecisionWindowService
 
     private const int DecisionVersion = 1;
     private const string DefaultProfile = "ai_safe";
-    private const string ModVersion = "0.1.0";
+    private const string ModVersion = "0.1.1";
     private static readonly TimeSpan CombatStableDelay = TimeSpan.FromMilliseconds(500);
     private static readonly object CombatStabilityGate = new();
     private static string? _lastCombatStabilitySignature;
