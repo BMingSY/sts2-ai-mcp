@@ -2024,6 +2024,17 @@ internal static class DecisionWindowService
             phase,
             state.turn,
             summary,
+            selection = state.selection == null
+                ? null
+                : new
+                {
+                    state.selection.kind,
+                    state.selection.min_select,
+                    state.selection.max_select,
+                    state.selection.selected_count,
+                    state.selection.requires_confirmation,
+                    state.selection.can_confirm
+                },
             choices = choices.Select(choice => new
             {
                 choice.action_id,

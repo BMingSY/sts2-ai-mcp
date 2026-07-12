@@ -562,8 +562,8 @@ async def main() -> None:
                     next_decision = data.get("next_decision")
                     if isinstance(next_decision, dict):
                         driver.last_decision = next_decision
-                elif line.startswith("select "):
-                    text = line[7:]
+                elif line == "select" or line.startswith("select "):
+                    text = line[7:] if line.startswith("select ") else ""
                     if "|" in text:
                         refs_text, note = [part.strip() for part in text.split("|", 1)]
                     else:
@@ -633,7 +633,7 @@ async def main() -> None:
                     print("FINISHED_LOG", driver.log_path, flush=True)
                 else:
                     print(
-                        "commands: state|current|act ACTION_ID | 中文理由|batch ACTION_ID ACTION_ID... | 中文理由|plan JSON_ARRAY | 中文理由|select CARD_REF... | 中文理由|lookup collection:id fields=a,b|note TEXT|finish TEXT|quit",
+                        "commands: state|current|act ACTION_ID | 中文理由|batch ACTION_ID ACTION_ID... | 中文理由|plan JSON_ARRAY | 中文理由|select [CARD_REF...] | 中文理由|lookup collection:id fields=a,b|note TEXT|finish TEXT|quit",
                         flush=True,
                     )
             except Exception as exc:

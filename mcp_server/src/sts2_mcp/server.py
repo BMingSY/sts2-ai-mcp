@@ -1348,13 +1348,13 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
         ) -> dict[str, Any]:
             """Select several cards from one current selection overlay and optionally confirm."""
             normalized_refs = [str(card_ref).strip() for card_ref in card_refs if str(card_ref).strip()]
-            if not normalized_refs:
+            if not normalized_refs and not confirm:
                 return {
                     "status": "rejected",
                     "stable": True,
                     "executed_count": 0,
                     "requested_count": 0,
-                    "stop_reason": "card_refs_must_not_be_empty",
+                    "stop_reason": "selection_plan_requires_cards_or_confirmation",
                 }
             if len(set(normalized_refs)) != len(normalized_refs):
                 return {

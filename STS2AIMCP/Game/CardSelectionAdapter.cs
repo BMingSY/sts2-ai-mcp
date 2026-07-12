@@ -206,6 +206,39 @@ internal static class CardSelectionAdapter
             : Array.Empty<NCardHolder>();
     }
 
+    public static NConfirmButton? GetGridConfirmButton(IScreenContext? currentScreen)
+    {
+        if (currentScreen is not NCardGridSelectionScreen gridScreen)
+        {
+            return null;
+        }
+
+        if (GetReflectedField(gridScreen, "_confirmButton") is NConfirmButton reflectedButton &&
+            GodotObject.IsInstanceValid(reflectedButton) &&
+            reflectedButton.IsEnabled &&
+            reflectedButton.IsVisibleInTree())
+        {
+            return reflectedButton;
+        }
+
+        var namedButton = gridScreen.GetNodeOrNull<NConfirmButton>("%Confirm")
+            ?? gridScreen.GetNodeOrNull<NConfirmButton>("Confirm");
+        if (namedButton != null &&
+            GodotObject.IsInstanceValid(namedButton) &&
+            namedButton.IsEnabled &&
+            namedButton.IsVisibleInTree())
+        {
+            return namedButton;
+        }
+
+        return FindDescendants<NConfirmButton>(gridScreen)
+            .FirstOrDefault(button =>
+                GodotObject.IsInstanceValid(button) &&
+                button.IsEnabled &&
+                button.IsVisibleInTree() &&
+                !button.Name.ToString().Contains("Preview", StringComparison.OrdinalIgnoreCase));
+    }
+
     public static CardSelectionSelectResult TrySelect(IScreenContext? currentScreen, int optionIndex)
     {
         if (!TryCreate(currentScreen, out var selection))

@@ -331,6 +331,66 @@ class V2ProfileTests(unittest.TestCase):
         self.assertEqual(len(client.take_calls), 3)
         self.assertEqual(result["next_decision"]["phase"], "combat")
 
+    def test_select_cards_can_confirm_an_empty_selection(self) -> None:
+        decisions = [
+            {
+                "decision_id": "run:f1:combat_selection:t1:empty",
+                "run_id": "RUN123",
+                "phase": "combat_selection",
+                "screen": "CARD_SELECTION",
+                "summary": {"floor": 1},
+                "context": {
+                    "selection": {
+                        "min_select": 0,
+                        "max_select": 2,
+                        "selected_count": 0,
+                        "can_confirm": True,
+                    }
+                },
+                "choices": [_choice("selection:confirm", "confirm_selection")],
+            },
+            {
+                "decision_id": "run:f1:combat:t1:done",
+                "run_id": "RUN123",
+                "phase": "combat",
+                "screen": "COMBAT",
+                "summary": {"floor": 1},
+                "context": {"combat": {"hand": []}},
+                "choices": [_choice("combat:end_turn", "end_turn")],
+            },
+        ]
+        client = SequentialPlanClient(decisions)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"STS2_AGENT_KNOWLEDGE_DIR": tmpdir}):
+                server = create_server(client=client, tool_profile="ai_safe_v2")
+                select_cards = asyncio.run(server.get_tool("select_cards"))
+                result = select_cards.fn(
+                    decision_id=decisions[0]["decision_id"],
+                    card_refs=[],
+                    confirm=True,
+                    client_note="return no cards",
+                    plan_id="empty-selection-plan",
+                )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["executed_count"], 1)
+        self.assertEqual(len(client.take_calls), 1)
+        self.assertEqual(client.take_calls[0]["action_id"], "selection:confirm")
+        self.assertEqual(result["next_decision"]["phase"], "combat")
+
+    def test_select_cards_rejects_an_empty_no_op(self) -> None:
+        server = create_server(client=DummyV2Client(), tool_profile="ai_safe_v2")
+        select_cards = asyncio.run(server.get_tool("select_cards"))
+
+        result = select_cards.fn(
+            decision_id="run:f1:combat:t1:abc123",
+            card_refs=[],
+            confirm=False,
+        )
+
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["stop_reason"], "selection_plan_requires_cards_or_confirmation")
+
     def test_combat_plan_stops_when_a_card_is_drawn(self) -> None:
         decisions = [
             {

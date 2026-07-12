@@ -1131,6 +1131,15 @@ internal static class GameActionService
         }
 
         var isCombatHandSelection = GameStateService.TryGetCombatHandSelectionMetadata(currentScreen, out _, out var combatHandSelection);
+        var isMultiGridSelection = false;
+        var selectedCountBefore = 0;
+        if (currentScreen is NCardGridSelectionScreen &&
+            CardSelectionAdapter.TryCreate(currentScreen, out var gridSelection) &&
+            (gridSelection.MinSelect == 0 || gridSelection.MaxSelect > 1))
+        {
+            isMultiGridSelection = true;
+            selectedCountBefore = gridSelection.SelectedCount;
+        }
         var selectResult = CardSelectionAdapter.TrySelect(currentScreen, request.option_index.Value);
         if (!selectResult.Success)
         {
@@ -1152,6 +1161,8 @@ internal static class GameActionService
 
         var stable = currentScreen switch
         {
+            NCardGridSelectionScreen cardSelectScreen when isMultiGridSelection =>
+                await WaitForGridSelectionStepAsync(cardSelectScreen, selectedCountBefore, TimeSpan.FromSeconds(10)),
             NCardGridSelectionScreen cardSelectScreen => await ConfirmDeckSelectionAsync(cardSelectScreen, TimeSpan.FromSeconds(10)),
             NChooseACardSelectionScreen chooseCardScreen => await WaitForChooseCardSelectionResolutionAsync(chooseCardScreen, TimeSpan.FromSeconds(10)),
             _ when isCombatHandSelection => await WaitForCombatHandSelectionStepAsync(combatHandSelection, TimeSpan.FromSeconds(10)),
@@ -1221,6 +1232,35 @@ internal static class GameActionService
     {
         var currentScreen = ActiveScreenContext.Instance.GetCurrentScreen();
         var screen = GameStateService.ResolveScreen(currentScreen);
+
+        if (currentScreen is NCardGridSelectionScreen gridScreen &&
+            CardSelectionAdapter.TryCreate(currentScreen, out var gridSelection) &&
+            (gridSelection.MinSelect == 0 || gridSelection.MaxSelect > 1))
+        {
+            var gridConfirmButton = CardSelectionAdapter.GetGridConfirmButton(currentScreen);
+            if (!GameStateService.CanConfirmSelection(currentScreen) ||
+                gridConfirmButton == null)
+            {
+                throw new ApiException(409, "invalid_action", "Action is not available in the current state.", new
+                {
+                    action = "confirm_selection",
+                    screen
+                });
+            }
+
+            gridConfirmButton.ForceClick();
+            var gridStable = await WaitForDeckSelectionResolutionAsync(
+                gridScreen,
+                DateTime.UtcNow + TimeSpan.FromSeconds(10));
+            return new ActionResponsePayload
+            {
+                action = "confirm_selection",
+                status = gridStable ? "completed" : "pending",
+                stable = gridStable,
+                message = gridStable ? "Action completed." : "Action queued but state is still transitioning.",
+                state = GameStateService.BuildStatePayload()
+            };
+        }
 
         if (currentScreen is NChooseABundleSelectionScreen bundleScreen)
         {
@@ -1688,6 +1728,47 @@ internal static class GameActionService
         }
 
         return false;
+    }
+
+    private static async Task<bool> WaitForGridSelectionStepAsync(
+        NCardGridSelectionScreen screen,
+        int selectedCountBefore,
+        TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        var previewConfirmed = false;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            await WaitForNextFrameAsync();
+
+            if (!GodotObject.IsInstanceValid(screen) ||
+                !ReferenceEquals(ActiveScreenContext.Instance.GetCurrentScreen(), screen))
+            {
+                return true;
+            }
+
+            var previewContainer = screen.GetNodeOrNull<Control>("%PreviewContainer");
+            var previewConfirm = screen.GetNodeOrNull<NConfirmButton>("%PreviewConfirm")
+                ?? previewContainer?.GetNodeOrNull<NConfirmButton>("Confirm");
+            if (!previewConfirmed &&
+                previewContainer?.Visible == true &&
+                previewConfirm?.IsEnabled == true)
+            {
+                previewConfirm.ForceClick();
+                previewConfirmed = true;
+                continue;
+            }
+
+            if (CardSelectionAdapter.TryCreate(screen, out var selection) &&
+                selection.SelectedCount > selectedCountBefore)
+            {
+                return true;
+            }
+        }
+
+        return CardSelectionAdapter.TryCreate(screen, out var finalSelection) &&
+            finalSelection.SelectedCount > selectedCountBefore;
     }
 
     private static bool TryGetDeckUpgradeConfirmButton(

@@ -795,6 +795,14 @@ internal static class GameStateService
                 confirmButton.IsVisibleInTree();
         }
 
+        if (currentScreen is NCardGridSelectionScreen &&
+            CardSelectionAdapter.TryCreate(currentScreen, out var gridSelection) &&
+            (gridSelection.MinSelect == 0 || gridSelection.MaxSelect > 1))
+        {
+            return gridSelection.CanConfirm &&
+                CardSelectionAdapter.GetGridConfirmButton(currentScreen) != null;
+        }
+
         return TryGetCombatHandSelectionMetadata(currentScreen, out _, out var metadata) &&
             metadata.RequiresConfirmation &&
             metadata.CanConfirm;
