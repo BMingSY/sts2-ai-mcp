@@ -8,7 +8,7 @@ This document defines the v2 HTTP contract that the MCP server should wrap. The 
 
 ## Versioning
 
-Protocol version: `2026-07-04-v2-draft`
+Protocol version: `2026-07-18-v2-draft`
 
 v2 endpoints live under:
 
@@ -85,9 +85,9 @@ Return the current stable decision if one exists. This endpoint does not wait.
     "available": true,
     "decision": {
       "decision_id": "WJT8A736AV:f33:combat:t6:0007",
-      "decision_version": 1,
-      "state_version": 11,
-      "protocol_version": "2026-07-04-v2-draft",
+      "decision_version": 4,
+      "state_version": 12,
+      "protocol_version": "2026-07-18-v2-draft",
       "run_id": "WJT8A736AV",
       "created_at_utc": "2026-07-04T12:00:00.0000000Z",
       "stable": true,
@@ -190,6 +190,17 @@ The normal success path includes `next_decision`. This keeps clients interactive
     "stable": true,
     "message": "Action completed; next decision is ready.",
     "previous_decision_id": "WJT8A736AV:f33:combat:t6:0007",
+    "result_delta": {
+      "schema_version": 1,
+      "source": "pre_post_state_comparison",
+      "complete": false,
+      "changes": [
+        {"path": "player.energy", "before": 3, "after": 2, "delta": -1},
+        {"path": "enemies[0:QUEEN].current_hp", "before": 100, "after": 88, "delta": -12}
+      ],
+      "trigger_events": [],
+      "trigger_events_complete": false
+    },
     "next_decision": {
       "decision_id": "WJT8A736AV:f33:combat:t6:0008",
       "phase": "combat",
@@ -219,6 +230,8 @@ If the action was accepted but the next stable decision does not become ready be
 ```
 
 The client should call `wait_for_decision` after a pending timeout. Normal play should not see this unless the game remains in a long transition or the Mod cannot classify the next state.
+
+`result_delta` is deliberately conservative. It reports stable values visible before and after the action. It does not invent intermediate trigger order; until engine event hooks are available, `trigger_events_complete` remains false.
 
 ---
 
@@ -298,6 +311,14 @@ localized text parsing. This keeps damage and Block previews available when the
 raw localization template contains placeholders such as `{Damage:diff()}` or
 `{Block:diff()}`.
 
+Every decision backed by a live run also includes `context.run_analysis`. It is a
+factual, non-prescriptive summary of deck size, upgrades/removability, starter and
+curse counts, type counts, energy-cost curve, detected draw/Block/energy/exhaust/
+power/Weak/Vulnerable roles, grouped role cards, coarse warning signals, and
+hypergeometric natural-access probabilities through turn 4. Its assumptions and
+limitations travel with the payload; it does not rank cards or promise boss
+readiness.
+
 Choices:
 
 - one `play_card` per legal playable card-target pair
@@ -327,6 +348,36 @@ Do not emit `resolve_rewards` or `collect_rewards_and_proceed` in `ai_safe`.
 Choices:
 
 - `choose_map_node` per available node
+
+### Character Select
+
+The preferred setup action binds both decisions at once:
+
+```json
+{
+  "action_id": "character_select:select:IRONCLAD:a10",
+  "kind": "select_character",
+  "label": "Select Ironclad / A10",
+  "source": {
+    "character_id": "IRONCLAD",
+    "ascension": 10
+  }
+}
+```
+
+The Mod generates one fully bound choice per unlocked character/ascension pair. The default `ai_safe_v2` MCP profile exposes `select_character(character_id, ascension)` and resolves it against those exact choices; raw and guided profiles accept the same two fields. Index-based character selection and ascension `+1/-1` remain compatibility actions, but v2 does not expose them as normal choices.
+
+### Selection
+
+`context.selection.cards[]` is the authoritative legal candidate list. Each runtime
+candidate includes `card_ref`, raw and resolved rules text, live `dynamic_vars`,
+`powers_applied`, modifier details, and an optional `consequence_preview`.
+Recognized Knowledge Demon choices currently describe the live runtime amount and
+constraint for `DISINTEGRATION`, `MIND_ROT`, `SLOTH`, and `WASTE_AWAY`; when the
+runtime amount is unavailable the preview is explicitly incomplete and must not be
+filled from static model data. `deck_interaction` relates those constraints to the
+current HP, deck size, cost curve, draw cards, or energy-generation cards without
+claiming a strategic ranking.
 
 ### Event
 
@@ -406,6 +457,14 @@ Lookup game data directly.
 
 The MCP wrapper serves this lookup from a versioned local snapshot. The direct Mod endpoint remains available for diagnostics and compatibility.
 
+## `POST /v2/data/search`
+
+Search live ModelDb entries by exact/partial ID, localized name, model type, or description. The request accepts `query`, optional `collections`, and a capped `limit`. Results include the owning collection so similarly named cards, monsters, encounters, and enchantments are not confused.
+
+## `GET /v2/data/ids`
+
+List IDs in one live collection with optional `query`, `offset`, and `limit` parameters. This is intended for development and GM scenario construction; the corresponding MCP tool is debug-gated.
+
 ## `POST /v2/data/export`
 
 Export all static ModelDb collections once for the running game version. MCP stores the response under `mcp_server/data/versions/<game_version>/` and does not call this endpoint again while a valid snapshot exists.
@@ -418,6 +477,8 @@ Collections:
 - `relics`
 - `potions`
 - `events`
+- `encounters`
+- `enchantments`
 
 The export metadata includes `game_version`, `mod_version`, `exported_at_utc`, and a content hash added by the MCP cache writer.
 
@@ -453,6 +514,31 @@ Decision payloads and lookup responses should include data freshness metadata wh
 
 If the loaded game version and cached data version differ, the server should mark cached data as stale or omit it from `knowledge.relevant` and require explicit lookup.
 
+Monster exports include the runtime-generated `state_machine`: its initial state, every move, conditional/random branches, cooldown/repeat constraints, intent kinds, and base attack values. Curated overrides may add prose such as Queen planning notes, but may only fill empty fields and must never replace a runtime state machine. Live `move_id`, intents, powers, and HP remain authoritative for the active combat.
+
+### Preview Completeness
+
+- Damage previews distinguish `pre_target_per_hit` from per-target `final_per_hit` and `final_total_damage`.
+- Complex linked effects such as “gain Block equal to damage dealt” use `linked_effects`, `preview_complete=false`, and `unmodeled_effects` when downstream triggers are not simulated.
+- End-turn previews expose an ordered `hit_timeline`, `automatic_consumables`, and final HP/Block. `FAIRY_IN_A_BOTTLE` is simulated at the lethal hit before later hits continue.
+- `simulation_scope=enemy_attack_intents_only` does not claim to resolve end-of-turn card, power, relic, orb, or room-script hooks.
+
+`POST /v2/decision/preview` accepts the current `decision_id` and one `action_id`. It never mutates the run. The response declares `complete`, `incomplete`, `source`, `coverage`, and `limitations`; the current runtime does not expose a transactional combat clone/rollback API, so unsupported downstream hooks remain explicit rather than guessed.
+
+### Ordered Action Trace
+
+`GET /v2/trace/actions?after_sequence=N` returns an ordered ring-buffer view of engine action lifecycle events. It covers every queued `GameAction` plus `GenericHookGameAction` hook ids, with `started`, `completed`, `failed`, or `cancelled` phases. `take_action` embeds the slice that occurred after its trace cursor in `action_trace` and in `result_delta.trigger_events`. Arbitrary callbacks that do not enqueue an action are outside the declared coverage.
+
+### Unified Trigger Progress
+
+Relics and powers share `trigger_progress.schema_version=1` with:
+
+- `primary.current`, optional `threshold`, `remaining`, and `next_trigger`;
+- named `counters`, `thresholds`, `parameters`, and boolean `statuses`;
+- `metrics[]` carrying each value's runtime source member.
+
+For counter relics, the game's `ShowCounter`/`DisplayAmount` is authoritative. Missing values are reported as unknown and are never inferred from localized descriptions.
+
 ---
 
 ## MCP-Side Run Logging
@@ -476,17 +562,33 @@ Recommended MCP behavior:
 | `health_check` | `GET /health` and v2 capability metadata |
 | `wait_for_decision` | `POST /v2/decision/wait` |
 | `get_current_decision` | `GET /v2/decision/current` |
+| `preview_action` | `POST /v2/decision/preview` |
+| `preview_action_plan` | MCP-local read-only preflight over the current decision |
 | `take_action` | `POST /v2/decision/act` |
+| `get_action_trace` | `GET /v2/trace/actions` |
 | `execute_action_plan` | MCP-local orchestration over successive `POST /v2/decision/act` calls |
 | `select_cards` | MCP-local multi-select convenience wrapper over `execute_action_plan` |
+| `select_character` | MCP-local exact character/ascension resolver followed by `POST /v2/decision/act` |
 | `lookup_game_data` | `POST /v2/data/lookup` |
+| `search_game_data` | Debug-only wrapper over `POST /v2/data/search` |
+| `list_model_ids` | Debug-only wrapper over `GET /v2/data/ids` |
 | `append_decision_note` | MCP-local log append; optional, no HTTP endpoint required |
 
 The MCP profile name should be `ai_safe_v2`.
 
+MCP startup validates the protocol version, minimum state/decision versions, and all required semantic capabilities before serving tools. A mismatched or unreachable Mod fails loudly. `STS2_MCP_ALLOW_INCOMPATIBLE=1` is the only explicit local override; compatibility is never silently assumed.
+
 ### Conditional Action Plans
 
-`execute_action_plan` reduces agent round trips without weakening v2 stale-decision validation. The MCP server executes one step at a time, consumes each action response's `next_decision`, resolves the next intent against that fresh decision, and stops before any step that is unavailable or ambiguous.
+`preview_action_plan` performs a read-only strict-combat preflight before execution.
+It resolves stable selectors and folds the known energy/star budget, card-play and
+shared limits, direct Block, direct damage, enemy Block/HP, and Vulnerable into a
+shadow state. It returns `validation_complete`, `effects_complete`,
+`known_infeasible`, `valid_prefix_count`, projected state, per-step limitations, and
+the information boundary where preflight stopped. It never calls the game action
+endpoint and declares `transactional_engine_dry_run=false`.
+
+`execute_action_plan` reduces agent round trips without weakening v2 stale-decision validation. Before mutating a combat, it runs the same preflight and returns `executed_count=0` for a known hard failure such as insufficient cumulative energy/stars, a known `SLOTH` card cap, a reused card reference, a shared play limit, or an already projected-dead target. Otherwise the MCP server executes one step at a time, consumes each action response's `next_decision`, resolves the next intent against that fresh decision, and stops before any step that is unavailable or ambiguous.
 
 Agents should prefer a strict plan over repeated single actions when they have already
 evaluated a deterministic 2-5 step combat line and none of the planned cards draw,
@@ -514,7 +616,16 @@ plan steps.
 
 Supported combat kinds are `play_card` and `use_potion`, with at most five steps. Supported selection kinds are `select_deck_card` and `confirm_selection`, with at most twelve steps. Combat and selection actions cannot be mixed in one plan. `end_turn` is intentionally unsupported.
 
-Strict combat plans stop when the phase changes, stable references are missing, a card is drawn or returned, an additional card leaves the hand, an action becomes illegal, or a selector matches zero or multiple choices. Results use partial-success semantics: completed game actions are logged individually and cannot be rolled back. The response includes `executed_count`, `stop_reason`, per-step results, and the latest `next_decision`.
+Preflight stops at an explicit information boundary after draws, generation/return,
+upgrade/transform, random discard, unsupported power changes, X-cost effects, potion
+effects, or a projected kill that can change the next decision. An information
+boundary means “re-read after this prefix,” not “the prefix is illegal.” Actual
+strict combat plans also stop when the phase changes, stable references are missing,
+an additional card leaves the hand, an action becomes illegal, or a selector matches
+zero or multiple choices. Results use partial-success semantics: completed game
+actions are logged individually and cannot be rolled back. The response includes
+`executed_count`, `stop_reason`, preflight, per-step results, and the latest
+`next_decision`.
 
 `select_cards` accepts the current `decision_id`, a unique list of `card_refs`, and `confirm=true|false`. It constructs the corresponding strict selection plan and confirms only when the fresh decision exposes a legal confirmation choice.
 

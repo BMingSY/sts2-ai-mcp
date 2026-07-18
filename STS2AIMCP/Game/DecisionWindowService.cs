@@ -4,19 +4,21 @@ using System.Text.RegularExpressions;
 using MegaCrit.Sts2.Core.Debug;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.MonsterMoves.Intents;
+using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
 using STS2AIMCP.Server;
 
 namespace STS2AIMCP.Game;
 
 internal static class DecisionWindowService
 {
-    public const string ProtocolVersion = "2026-07-04-v2-draft";
+    public const string ProtocolVersion = "2026-07-18-v2-draft";
 
     private static Dictionary<string, Dictionary<string, Dictionary<string, object?>>>? _modelDbGameDataIndex;
 
-    private const int DecisionVersion = 1;
+    internal const int DecisionVersion = 4;
     private const string DefaultProfile = "ai_safe";
-    private const string ModVersion = "0.1.1";
+    private const string ModVersion = "0.1.5";
     private static readonly TimeSpan CombatStableDelay = TimeSpan.FromMilliseconds(500);
     private static readonly object CombatStabilityGate = new();
     private static string? _lastCombatStabilitySignature;
@@ -84,7 +86,7 @@ internal static class DecisionWindowService
         var current = GetCurrent(new DecisionRequestOptions
         {
             profile = DefaultProfile,
-            include_raw_state = false,
+            include_raw_state = true,
             include_relevant_game_data = false
         });
 
@@ -148,7 +150,10 @@ internal static class DecisionWindowService
         }
 
         var actionRequest = BuildActionRequest(choice, request);
+        var beforeState = current.raw_state;
+        var traceCursor = ActionTraceService.Cursor;
         var actionResponse = await GameActionService.ExecuteAsync(actionRequest);
+        var actionTrace = ActionTraceService.SnapshotSince(traceCursor);
         DecisionWindowPayload? nextDecision = null;
 
         if (actionResponse.stable &&
@@ -171,7 +176,204 @@ internal static class DecisionWindowService
             stable = actionResponse.stable,
             message = actionResponse.message,
             previous_decision_id = decision.decision_id,
+            result_delta = BuildResultDelta(beforeState, actionResponse.state, actionTrace),
+            action_trace_cursor = traceCursor,
+            action_trace = actionTrace,
             next_decision = nextDecision
+        };
+    }
+
+    public static DecisionPreviewResponsePayload Preview(DecisionPreviewRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.decision_id) || string.IsNullOrWhiteSpace(request.action_id))
+        {
+            throw new ApiException(400, "invalid_request", "decision_id and action_id are required.");
+        }
+
+        var current = GetCurrent(new DecisionRequestOptions
+        {
+            profile = DefaultProfile,
+            include_raw_state = false,
+            include_relevant_game_data = false
+        });
+        if (!current.available || current.decision == null)
+        {
+            throw new ApiException(409, "decision_unavailable", "No stable decision is currently available.", retryable: true);
+        }
+
+        var decision = current.decision;
+        if (!string.Equals(decision.decision_id, request.decision_id, StringComparison.Ordinal))
+        {
+            throw new ApiException(409, "stale_decision", "Decision window changed. Read the current decision again.", new
+            {
+                expected_decision_id = request.decision_id,
+                actual_decision_id = decision.decision_id
+            }, retryable: true);
+        }
+
+        var choice = decision.choices.FirstOrDefault(candidate =>
+            string.Equals(candidate.action_id, request.action_id, StringComparison.Ordinal));
+        if (choice == null)
+        {
+            throw new ApiException(409, "invalid_action", "action_id does not exist in this decision.");
+        }
+
+        var complete = ReadPreviewCompleteness(choice.preview);
+        return new DecisionPreviewResponsePayload
+        {
+            decision_id = decision.decision_id,
+            action_id = choice.action_id,
+            kind = choice.kind,
+            mutation_performed = false,
+            complete = complete,
+            incomplete = !complete,
+            source = ResolvePreviewSource(choice.kind),
+            preview = choice.preview,
+            coverage = new
+            {
+                live_engine_dynamic_values = choice.kind == "play_card",
+                live_target_modifiers = choice.kind == "play_card",
+                ordered_intent_hits = choice.kind == "end_turn",
+                transactional_engine_dry_run = false
+            },
+            limitations = complete
+                ? Array.Empty<string>()
+                : new[]
+                {
+                    "The current STS2 runtime does not expose a transactional combat clone/rollback API.",
+                    "Unsupported downstream hooks remain explicit in preview.unmodeled_effects instead of being guessed."
+                }
+        };
+    }
+
+    private static bool ReadPreviewCompleteness(object? preview)
+    {
+        if (preview == null)
+        {
+            return false;
+        }
+
+        foreach (var name in new[] { "preview_complete", "complete" })
+        {
+            object? value = preview is IReadOnlyDictionary<string, object?> readOnly && readOnly.TryGetValue(name, out var readOnlyValue)
+                ? readOnlyValue
+                : preview is IDictionary<string, object?> dictionary && dictionary.TryGetValue(name, out var dictionaryValue)
+                    ? dictionaryValue
+                    : preview.GetType().GetProperty(name)?.GetValue(preview);
+            if (value is bool flag)
+            {
+                return flag;
+            }
+        }
+
+        return false;
+    }
+
+    private static string ResolvePreviewSource(string kind)
+    {
+        return kind switch
+        {
+            "play_card" => "live_engine_dynamic_values_and_target_modifiers",
+            "end_turn" => "ordered_live_intent_simulation",
+            _ => "current_decision_metadata"
+        };
+    }
+
+    private static object BuildResultDelta(GameStatePayload? before, GameStatePayload after, ActionTracePayload actionTrace)
+    {
+        var changes = new List<object>();
+
+        void AddNumber(string path, int? oldValue, int? newValue)
+        {
+            if (oldValue == newValue)
+            {
+                return;
+            }
+
+            changes.Add(new
+            {
+                path,
+                before = oldValue,
+                after = newValue,
+                delta = oldValue.HasValue && newValue.HasValue ? newValue.Value - oldValue.Value : (int?)null
+            });
+        }
+
+        void AddValue(string path, string? oldValue, string? newValue)
+        {
+            if (string.Equals(oldValue, newValue, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            changes.Add(new { path, before = oldValue, after = newValue });
+        }
+
+        AddValue("screen", before?.screen, after.screen);
+        AddNumber("turn", before?.turn, after.turn);
+        AddNumber("run.floor", before?.run?.floor, after.run?.floor);
+        AddNumber("run.ascension", before?.run?.ascension ?? before?.character_select?.ascension, after.run?.ascension ?? after.character_select?.ascension);
+        AddNumber("player.current_hp", before?.combat?.player.current_hp ?? before?.run?.current_hp, after.combat?.player.current_hp ?? after.run?.current_hp);
+        AddNumber("player.block", before?.combat?.player.block, after.combat?.player.block);
+        AddNumber("player.energy", before?.combat?.player.energy, after.combat?.player.energy);
+        AddNumber("player.stars", before?.combat?.player.stars, after.combat?.player.stars);
+        AddNumber("combat.cards_played_this_turn", before?.combat?.cards_played_this_turn, after.combat?.cards_played_this_turn);
+        AddNumber("piles.draw.count", before?.combat?.piles.draw.count, after.combat?.piles.draw.count);
+        AddNumber("piles.discard.count", before?.combat?.piles.discard.count, after.combat?.piles.discard.count);
+        AddNumber("piles.exhaust.count", before?.combat?.piles.exhaust.count, after.combat?.piles.exhaust.count);
+
+        if (before?.combat != null && after.combat != null)
+        {
+            foreach (var oldEnemy in before.combat.enemies)
+            {
+                var newEnemy = after.combat.enemies.FirstOrDefault(candidate =>
+                    string.Equals(candidate.enemy_ref, oldEnemy.enemy_ref, StringComparison.Ordinal) ||
+                    (candidate.index == oldEnemy.index && string.Equals(candidate.enemy_id, oldEnemy.enemy_id, StringComparison.OrdinalIgnoreCase)));
+                if (newEnemy == null)
+                {
+                    continue;
+                }
+
+                var prefix = $"enemies[{oldEnemy.index}:{oldEnemy.enemy_id}]";
+                AddNumber($"{prefix}.current_hp", oldEnemy.current_hp, newEnemy.current_hp);
+                AddNumber($"{prefix}.block", oldEnemy.block, newEnemy.block);
+            }
+        }
+
+        if (before?.run != null && after.run != null)
+        {
+            foreach (var oldRelic in before.run.relics)
+            {
+                var newRelic = after.run.relics.FirstOrDefault(candidate =>
+                    string.Equals(candidate.relic_id, oldRelic.relic_id, StringComparison.OrdinalIgnoreCase));
+                if (newRelic != null)
+                {
+                    AddNumber($"relics[{oldRelic.relic_id}].stack", oldRelic.stack, newRelic.stack);
+                }
+            }
+
+            var maxPotionSlots = Math.Max(before.run.potions.Length, after.run.potions.Length);
+            for (var index = 0; index < maxPotionSlots; index += 1)
+            {
+                var oldPotion = index < before.run.potions.Length ? before.run.potions[index].potion_id : null;
+                var newPotion = index < after.run.potions.Length ? after.run.potions[index].potion_id : null;
+                AddValue($"potions[{index}].potion_id", oldPotion, newPotion);
+            }
+        }
+
+        return new
+        {
+            schema_version = 1,
+            source = "pre_post_state_comparison",
+            complete = false,
+            changes = changes.ToArray(),
+            trigger_events = actionTrace.events,
+            trigger_events_complete = actionTrace.coverage.queued_game_actions && actionTrace.coverage.generic_hook_actions,
+            limitations = new[]
+            {
+                "Only state exposed before and after the action is compared.",
+                "The ordered trigger list covers queued GameAction and GenericHookGameAction execution; arbitrary callbacks that do not enqueue an action are outside trace coverage."
+            }
         };
     }
 
@@ -252,6 +454,143 @@ internal static class DecisionWindowService
                 ["exported_at_utc"] = DateTime.UtcNow.ToString("O"),
                 ["content_hash"] = null
             }
+        };
+    }
+
+    public static GameDataSearchPayload SearchGameData(GameDataSearchRequest request)
+    {
+        var query = request.query?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            throw new ApiException(400, "invalid_request", "query is required.");
+        }
+
+        var indexes = BuildModelDbGameDataIndex();
+        var requestedCollections = request.collections?
+            .Where(collection => !string.IsNullOrWhiteSpace(collection))
+            .Select(collection => collection.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var limit = Math.Clamp(request.limit ?? 25, 1, 100);
+
+        var matches = indexes
+            .Where(pair => requestedCollections == null || requestedCollections.Count == 0 || requestedCollections.Contains(pair.Key))
+            .SelectMany(collection => collection.Value.Values
+                .DistinctBy(
+                    item => item.TryGetValue("id", out var id) ? id?.ToString() ?? string.Empty : string.Empty,
+                    StringComparer.OrdinalIgnoreCase)
+                .Select(item => new
+                {
+                    collection = collection.Key,
+                    item,
+                    score = ScoreGameDataMatch(item, query)
+                }))
+            .Where(candidate => candidate.score >= 0)
+            .OrderBy(candidate => candidate.score)
+            .ThenBy(candidate => candidate.collection, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(candidate => candidate.item.TryGetValue("id", out var id) ? id?.ToString() : null, StringComparer.OrdinalIgnoreCase)
+            .Take(limit)
+            .Select(candidate => new GameDataSearchItemPayload
+            {
+                collection = candidate.collection,
+                id = candidate.item.TryGetValue("id", out var id) ? id?.ToString() ?? string.Empty : string.Empty,
+                name = candidate.item.TryGetValue("name", out var name) ? name?.ToString() : null,
+                model_type = candidate.item.TryGetValue("model_type", out var modelType) ? modelType?.ToString() : null,
+                description = candidate.item.TryGetValue("description", out var description) ? description?.ToString() : null,
+                match_rank = candidate.score
+            })
+            .ToArray();
+
+        return new GameDataSearchPayload
+        {
+            query = query,
+            collections = requestedCollections?.OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray() ?? Array.Empty<string>(),
+            matches = matches,
+            available_collections = indexes.Keys.OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray(),
+            metadata = BuildGameDataMetadata()
+        };
+    }
+
+    public static GameDataIdListPayload ListModelIds(string? collection, string? query, int offset, int limit)
+    {
+        var normalizedCollection = collection?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(normalizedCollection))
+        {
+            throw new ApiException(400, "invalid_request", "collection is required.");
+        }
+
+        var indexes = BuildModelDbGameDataIndex();
+        if (!indexes.TryGetValue(normalizedCollection, out var index))
+        {
+            throw new ApiException(404, "unknown_collection", $"Game-data collection '{normalizedCollection}' was not found.", new
+            {
+                collection = normalizedCollection,
+                available_collections = indexes.Keys.OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray()
+            });
+        }
+
+        var normalizedQuery = query?.Trim() ?? string.Empty;
+        var safeOffset = Math.Max(0, offset);
+        var safeLimit = Math.Clamp(limit, 1, 250);
+        var allItems = index.Values
+            .DistinctBy(
+                item => item.TryGetValue("id", out var id) ? id?.ToString() ?? string.Empty : string.Empty,
+                StringComparer.OrdinalIgnoreCase)
+            .Select(item => new GameDataIdItemPayload
+            {
+                id = item.TryGetValue("id", out var id) ? id?.ToString() ?? string.Empty : string.Empty,
+                name = item.TryGetValue("name", out var name) ? name?.ToString() : null,
+                model_type = item.TryGetValue("model_type", out var modelType) ? modelType?.ToString() : null
+            })
+            .Where(item =>
+                string.IsNullOrWhiteSpace(normalizedQuery) ||
+                item.id.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) ||
+                (item.name?.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (item.model_type?.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) ?? false))
+            .OrderBy(item => item.id, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return new GameDataIdListPayload
+        {
+            collection = normalizedCollection,
+            query = string.IsNullOrWhiteSpace(normalizedQuery) ? null : normalizedQuery,
+            offset = safeOffset,
+            limit = safeLimit,
+            total = allItems.Length,
+            items = allItems.Skip(safeOffset).Take(safeLimit).ToArray(),
+            available_collections = indexes.Keys.OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray(),
+            metadata = BuildGameDataMetadata()
+        };
+    }
+
+    private static int ScoreGameDataMatch(Dictionary<string, object?> item, string query)
+    {
+        static string Text(Dictionary<string, object?> source, string field) =>
+            source.TryGetValue(field, out var value) ? value?.ToString() ?? string.Empty : string.Empty;
+
+        var id = Text(item, "id");
+        var name = Text(item, "name");
+        var modelType = Text(item, "model_type");
+        var description = Text(item, "description");
+        if (id.Equals(query, StringComparison.OrdinalIgnoreCase)) return 0;
+        if (name.Equals(query, StringComparison.OrdinalIgnoreCase)) return 1;
+        if (id.StartsWith(query, StringComparison.OrdinalIgnoreCase)) return 2;
+        if (name.StartsWith(query, StringComparison.OrdinalIgnoreCase)) return 3;
+        if (id.Contains(query, StringComparison.OrdinalIgnoreCase)) return 4;
+        if (name.Contains(query, StringComparison.OrdinalIgnoreCase)) return 5;
+        if (modelType.Contains(query, StringComparison.OrdinalIgnoreCase)) return 6;
+        if (description.Contains(query, StringComparison.OrdinalIgnoreCase)) return 7;
+        return -1;
+    }
+
+    private static Dictionary<string, object?> BuildGameDataMetadata()
+    {
+        return new Dictionary<string, object?>
+        {
+            ["game_version"] = ReleaseInfoManager.Instance.ReleaseInfo?.Version ?? "unknown",
+            ["mod_version"] = ModVersion,
+            ["data_source"] = "loaded_game_model",
+            ["exported_at_utc"] = DateTime.UtcNow.ToString("O"),
+            ["content_hash"] = null
         };
     }
 
@@ -571,15 +910,21 @@ internal static class DecisionWindowService
         {
             var incomingDamage = combat.incoming_damage;
             var unblockedDamage = Math.Max(0, incomingDamage - combat.player.block);
+            var endTurnSimulation = combat.end_turn_simulation;
             var riskTags = new List<string>();
             if (incomingDamage > 0)
             {
                 riskTags.Add("incoming_damage");
             }
 
-            if (unblockedDamage >= combat.player.current_hp && incomingDamage > 0)
+            if (endTurnSimulation.will_kill_player)
             {
                 riskTags.Add("lethal");
+            }
+
+            if (endTurnSimulation.automatic_consumables.Length > 0)
+            {
+                riskTags.Add("automatic_consumable");
             }
 
             choices.Add(NoArgChoice(
@@ -605,7 +950,7 @@ internal static class DecisionWindowService
                         })
                         .ToArray()
                 },
-                preview: BuildEndTurnPreview(combat)));
+            preview: BuildEndTurnPreview(combat)));
         }
     }
 
@@ -622,6 +967,7 @@ internal static class DecisionWindowService
             ["card_name"] = card.name,
             ["card_keywords"] = card.keywords,
             ["card_mods"] = card.mods,
+            ["card_modifier_details"] = card.modifier_details,
             ["card_affliction_id"] = card.affliction_id,
             ["card_affliction_name"] = card.affliction_name,
             ["card_affliction_description"] = card.affliction_description,
@@ -706,9 +1052,28 @@ internal static class DecisionWindowService
         {
             notes.Add("Used the game's live dynamic-variable preview for card Block.");
         }
+        var modifierBlockGain = EstimateModifierBlockGain(card, notes);
+        if (blockGain.HasValue && modifierBlockGain != 0)
+        {
+            blockGain += modifierBlockGain;
+        }
         var powersApplied = MergePowerPreviews(
             ExtractAppliedPowers(card.rules_text),
             BuildPowersAppliedFromCombatDynamicVars(card.dynamic_vars));
+        var unmodeledEffects = new List<string>();
+        var blockEqualsDamage = string.Equals(card.card_id, "FISTICUFFS", StringComparison.OrdinalIgnoreCase) ||
+            card.rules_text.Contains("equal to the damage dealt", StringComparison.OrdinalIgnoreCase) ||
+            card.rules_text.Contains("等量于所造成伤害的格挡", StringComparison.Ordinal);
+        if (blockEqualsDamage)
+        {
+            unmodeledEffects.Add("Block derived from actual damage dealt is target- and trigger-dependent; the Block amount is not included in the simple block estimate.");
+            notes.Add("This card links Block to actual damage dealt; consult each target's final damage and treat downstream Block triggers as unresolved.");
+        }
+
+        if ((blockBase.HasValue || blockEqualsDamage) && HasPower(combat.player.powers, "JUGGERNAUT", "Juggernaut"))
+        {
+            unmodeledEffects.Add("Juggernaut or another on-Block trigger may deal secondary damage; secondary trigger damage is not included in damage.targets[].");
+        }
 
         if (card.costs_x && combat.player.energy == 0)
         {
@@ -721,14 +1086,20 @@ internal static class DecisionWindowService
         }
 
         if (card.rules_text.Contains("random", StringComparison.OrdinalIgnoreCase) ||
+            card.rules_text.Contains("随机", StringComparison.Ordinal) ||
             card.target_type.Contains("Random", StringComparison.OrdinalIgnoreCase))
         {
             notes.Add("Random targeting/effects are not deterministic in this preview.");
+            unmodeledEffects.Add("Random targeting or random effects are not resolved by this preview.");
         }
 
         return new
         {
-            estimate_confidence = ResolvePreviewConfidence(card, damageBase, blockBase, powersApplied, notes),
+            estimate_confidence = unmodeledEffects.Count > 0
+                ? "partial"
+                : ResolvePreviewConfidence(card, damageBase, blockBase, powersApplied, notes),
+            preview_complete = unmodeledEffects.Count == 0,
+            effect_scope = "direct_card_values_and_exposed_target_modifiers",
             card_id = card.card_id,
             card_name = card.name,
             card_type = card.card_type,
@@ -759,6 +1130,8 @@ internal static class DecisionWindowService
                 ? new
                 {
                     base_per_hit = damageBase,
+                    pre_target_per_hit = damagePerHit,
+                    pre_target_total_damage = damagePerHit * hitCount,
                     estimated_per_hit = damagePerHit,
                     hit_count = hitCount,
                     estimated_total_before_block = damagePerHit * hitCount,
@@ -773,7 +1146,20 @@ internal static class DecisionWindowService
                     block_after = blockGain.HasValue ? combat.player.block + blockGain.Value : (int?)null
                 }
                 : null,
+            linked_effects = blockEqualsDamage
+                ? new object[]
+                {
+                    new
+                    {
+                        type = "block_equal_to_damage_dealt",
+                        source_damage = "damage.targets[].final_total_damage",
+                        status = "not_fully_simulated",
+                        downstream_triggers_included = false
+                    }
+                }
+                : Array.Empty<object>(),
             powers_applied = powersApplied,
+            unmodeled_effects = unmodeledEffects.Distinct(StringComparer.Ordinal).ToArray(),
             notes = notes.Distinct(StringComparer.Ordinal).ToArray()
         };
     }
@@ -787,15 +1173,24 @@ internal static class DecisionWindowService
 
     private static object BuildEndTurnPreview(CombatPayload combat)
     {
-        var unblockedDamage = Math.Max(0, combat.incoming_damage - combat.player.block);
+        var simulation = combat.end_turn_simulation;
         return new
         {
+            estimate_confidence = simulation.intent_damage_complete ? "high_for_exposed_attack_intents" : "partial",
+            complete = false,
+            incomplete = true,
+            simulation_scope = simulation.scope,
             incoming_damage = combat.incoming_damage,
             current_block = combat.player.block,
-            unblocked_damage = unblockedDamage,
+            unblocked_damage = combat.unblocked_damage,
             current_hp = combat.player.current_hp,
-            hp_after = Math.Max(0, combat.player.current_hp - unblockedDamage),
-            will_kill_player = combat.incoming_damage > 0 && unblockedDamage >= combat.player.current_hp,
+            hp_after = simulation.hp_after,
+            block_after = simulation.block_after,
+            will_kill_player = simulation.will_kill_player,
+            intent_damage_complete = simulation.intent_damage_complete,
+            hit_timeline = simulation.hit_timeline,
+            automatic_consumables = simulation.automatic_consumables,
+            unmodeled_effects = simulation.unmodeled_effects,
             lethal_risks = combat.lethal_risks,
             enemy_intents = combat.enemies
                 .Where(enemy => enemy.is_alive)
@@ -884,8 +1279,11 @@ internal static class DecisionWindowService
             name = enemy.name,
             current_hp = enemy.current_hp,
             current_block = enemy.block,
+            pre_target_per_hit = damagePerHit,
+            final_per_hit = adjustedPerHit,
             estimated_per_hit = adjustedPerHit,
             hit_count = hitCount,
+            final_total_damage = totalDamage,
             estimated_total_damage = totalDamage,
             estimated_block_damage = blockDamage,
             estimated_hp_damage = hpDamage,
@@ -915,6 +1313,26 @@ internal static class DecisionWindowService
         }
 
         return Math.Max(0, block);
+    }
+
+    private static int EstimateModifierBlockGain(CombatHandCardPayload card, List<string> notes)
+    {
+        var additiveBlock = card.modifier_details
+            .Where(modifier =>
+                string.Equals(modifier.modifier_id, "ADROIT", StringComparison.OrdinalIgnoreCase) ||
+                (!string.IsNullOrWhiteSpace(modifier.description) &&
+                 (modifier.description.Contains("gain", StringComparison.OrdinalIgnoreCase) ||
+                  modifier.description.Contains("获得", StringComparison.Ordinal)) &&
+                 (modifier.description.Contains("block", StringComparison.OrdinalIgnoreCase) ||
+                  modifier.description.Contains("格挡", StringComparison.Ordinal))))
+            .Sum(modifier => modifier.amount ?? 0);
+
+        if (additiveBlock != 0)
+        {
+            notes.Add($"Applied structured card modifiers: Block {additiveBlock:+#;-#;0}.");
+        }
+
+        return additiveBlock;
     }
 
     private static object[] ExtractAppliedPowers(string rulesText)
@@ -1109,7 +1527,7 @@ internal static class DecisionWindowService
     {
         return powers
             .Where(power =>
-                string.Equals(power.power_id, powerId, StringComparison.OrdinalIgnoreCase) ||
+                PowerIdMatches(power.power_id, powerId) ||
                 string.Equals(power.name, name, StringComparison.OrdinalIgnoreCase))
             .Sum(power => power.amount ?? 0);
     }
@@ -1117,9 +1535,22 @@ internal static class DecisionWindowService
     private static bool HasPower(IEnumerable<CombatPowerPayload> powers, string powerId, string name)
     {
         return powers.Any(power =>
-            (string.Equals(power.power_id, powerId, StringComparison.OrdinalIgnoreCase) ||
+            (PowerIdMatches(power.power_id, powerId) ||
              string.Equals(power.name, name, StringComparison.OrdinalIgnoreCase)) &&
             (power.amount ?? 1) != 0);
+    }
+
+    private static bool PowerIdMatches(string? actual, string expected)
+    {
+        static string Normalize(string? value)
+        {
+            var normalized = value?.Trim() ?? string.Empty;
+            return normalized.EndsWith("_POWER", StringComparison.OrdinalIgnoreCase)
+                ? normalized[..^"_POWER".Length]
+                : normalized;
+        }
+
+        return string.Equals(Normalize(actual), Normalize(expected), StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ResolvePreviewConfidence(
@@ -1794,21 +2225,31 @@ internal static class DecisionWindowService
 
         if (actions.Contains("select_character"))
         {
-            foreach (var character in characterSelect.characters.Where(character => !character.is_locked && !character.is_selected))
+            foreach (var character in characterSelect.characters.Where(character => !character.is_locked && !character.is_random))
             {
-                choices.Add(IndexChoice(
-                    $"character_select:select:{character.index}:{character.character_id}",
-                    "select_character",
-                    $"Select {character.name}",
-                    null,
-                    "select_character",
-                    state.screen,
-                    optionIndex: character.index,
-                    sourceExtra: new Dictionary<string, object?>
+                var characterMaxAscension = character.max_ascension ?? characterSelect.max_ascension;
+                for (var ascension = 0; ascension <= characterMaxAscension; ascension += 1)
+                {
+                    if (character.is_selected && ascension == characterSelect.ascension)
                     {
-                        ["character_id"] = character.character_id,
-                        ["character_name"] = character.name
-                    }));
+                        continue;
+                    }
+
+                    choices.Add(IndexChoice(
+                        $"character_select:select:{character.character_id}:a{ascension}",
+                        "select_character",
+                        $"Select {character.name} / A{ascension}",
+                        $"Set character and exact ascension in one action (unlocked range: A0-A{characterMaxAscension}).",
+                        "select_character",
+                        state.screen,
+                        optionIndex: character.index,
+                        sourceExtra: new Dictionary<string, object?>
+                        {
+                            ["character_id"] = character.character_id,
+                            ["character_name"] = character.name,
+                            ["ascension"] = ascension
+                        }));
+                }
             }
         }
 
@@ -1836,16 +2277,6 @@ internal static class DecisionWindowService
         if (actions.Contains("unready") || characterSelect.can_unready)
         {
             choices.Add(NoArgChoice("character_select:unready", "unready", "Unready", null, "unready", state.screen));
-        }
-
-        if (actions.Contains("increase_ascension") || characterSelect.can_increase_ascension)
-        {
-            choices.Add(NoArgChoice("character_select:increase_ascension", "increase_ascension", "Increase ascension", null, "increase_ascension", state.screen));
-        }
-
-        if (actions.Contains("decrease_ascension") || characterSelect.can_decrease_ascension)
-        {
-            choices.Add(NoArgChoice("character_select:decrease_ascension", "decrease_ascension", "Decrease ascension", null, "decrease_ascension", state.screen));
         }
 
         if (actions.Contains("host_multiplayer_lobby"))
@@ -1991,6 +2422,8 @@ internal static class DecisionWindowService
             card_index = GetInt(source, "card_index"),
             option_index = GetInt(source, "option_index"),
             target_index = GetInt(source, "target_index"),
+            character_id = GetString(source, "character_id"),
+            ascension = GetInt(source, "ascension"),
             client_context = new
             {
                 source = "v2_decision",
@@ -2065,7 +2498,7 @@ internal static class DecisionWindowService
             ["floor"] = run?.floor,
             ["turn"] = state.turn,
             ["character_id"] = run?.character_id ?? state.character_select?.selected_character_id,
-            ["ascension"] = state.character_select?.ascension,
+            ["ascension"] = run?.ascension ?? state.character_select?.ascension,
             ["current_hp"] = combat?.player.current_hp ?? run?.current_hp,
             ["max_hp"] = combat?.player.max_hp ?? run?.max_hp,
             ["block"] = combat?.player.block,
@@ -2150,6 +2583,11 @@ internal static class DecisionWindowService
             case "game_over":
                 context["game_over"] = state.game_over;
                 break;
+        }
+
+        if (state.run != null)
+        {
+            context["run_analysis"] = BuildRunAnalysis(state.run);
         }
 
         return context;
@@ -2561,7 +2999,9 @@ internal static class DecisionWindowService
         }
 
         var listedCardCounts = selection.cards
-            .GroupBy(card => BuildCardIdentityKey(card.card_id, card.name, card.upgraded, card.rules_text), StringComparer.Ordinal)
+            .GroupBy(
+                card => BuildCardIdentityKey(card.card_id, card.name, card.upgraded, card.raw_rules_text),
+                StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
 
         var unlistedDeckCards = new List<object>();
@@ -2601,8 +3041,113 @@ internal static class DecisionWindowService
             selection.requires_confirmation,
             selection.can_confirm,
             selection_note = "Only cards listed in selection.cards are legal choices for this selection. Do not choose cards from run.deck that are not listed here.",
-            cards = selection.cards,
+            cards = selection.cards.Select(card => new
+            {
+                card.index,
+                card.card_ref,
+                card.card_id,
+                card.name,
+                card.upgraded,
+                card.card_type,
+                card.rarity,
+                card.costs_x,
+                card.star_costs_x,
+                card.energy_cost,
+                card.star_cost,
+                card.rules_text,
+                card.raw_rules_text,
+                card.resolved_rules_text,
+                card.dynamic_vars,
+                card.powers_applied,
+                card.keywords,
+                card.mods,
+                card.modifier_details,
+                card.selectable,
+                card.consequence_preview,
+                deck_interaction = BuildSelectionDeckInteraction(card, run)
+            }).ToArray(),
             unlisted_deck_cards = unlistedDeckCards.ToArray()
+        };
+    }
+
+    private static object? BuildSelectionDeckInteraction(SelectionCardPayload card, RunPayload? run)
+    {
+        if (run == null)
+        {
+            return null;
+        }
+
+        var cardId = card.card_id.Trim().ToUpperInvariant();
+        var expectedPowerId = cardId switch
+        {
+            "DISINTEGRATION" => "DISINTEGRATION_POWER",
+            "MIND_ROT" => "MIND_ROT_POWER",
+            "SLOTH" => "SLOTH_POWER",
+            "WASTE_AWAY" => "WASTE_AWAY_POWER",
+            _ => null
+        };
+        if (expectedPowerId == null)
+        {
+            return null;
+        }
+
+        var amount = card.powers_applied
+            .FirstOrDefault(power => string.Equals(power.power_id, expectedPowerId, StringComparison.OrdinalIgnoreCase))
+            ?.amount;
+        var drawCards = run.deck.Where(IsDrawCard).ToArray();
+        var energyCards = run.deck.Where(IsEnergyGenerationCard).ToArray();
+        var zeroCostCards = run.deck.Where(candidate => !candidate.costs_x && candidate.energy_cost == 0).ToArray();
+        var expensiveCards = run.deck.Where(candidate => !candidate.costs_x && candidate.energy_cost >= 2).ToArray();
+
+        return cardId switch
+        {
+            "SLOTH" => new
+            {
+                interaction = "card_play_limit_vs_current_deck",
+                max_cards_per_turn = amount,
+                zero_cost_cards = BuildRunCardGroups(zeroCostCards),
+                draw_cards = BuildRunCardGroups(drawCards),
+                energy_generation_cards = BuildRunCardGroups(energyCards),
+                conflicting_card_count = zeroCostCards
+                    .Concat(drawCards)
+                    .Concat(energyCards)
+                    .Select(candidate => candidate.index)
+                    .Distinct()
+                    .Count()
+            },
+            "MIND_ROT" => new
+            {
+                interaction = "draw_reduction_vs_deck_size",
+                draw_per_turn_delta = amount.HasValue ? -amount.Value : (decimal?)null,
+                deck_size = run.deck.Length,
+                draw_cards = BuildRunCardGroups(drawCards),
+                natural_turns_to_see_deck_before = NaturalTurnsToSeeDeck(run.deck.Length, 5),
+                natural_turns_to_see_deck_after = NaturalTurnsToSeeDeck(
+                    run.deck.Length,
+                    Math.Max(1, 5 - (int)Math.Max(0, amount ?? 0)))
+            },
+            "WASTE_AWAY" => new
+            {
+                interaction = "energy_reduction_vs_cost_curve",
+                energy_per_turn_delta = amount.HasValue ? -amount.Value : (decimal?)null,
+                max_energy_before = run.max_energy,
+                projected_base_energy_after = amount.HasValue
+                    ? Math.Max(0, run.max_energy - (int)Math.Max(0, amount.Value))
+                    : (int?)null,
+                cards_costing_two_or_more = BuildRunCardGroups(expensiveCards),
+                energy_generation_cards = BuildRunCardGroups(energyCards)
+            },
+            "DISINTEGRATION" => new
+            {
+                interaction = "end_turn_self_damage_vs_current_hp",
+                end_turn_self_damage = amount,
+                current_hp = run.current_hp,
+                hp_only_turns_to_zero = amount > 0
+                    ? (int?)Math.Ceiling(run.current_hp / amount.Value)
+                    : null,
+                note = "HP-only horizon ignores Block, healing, relics, and later runtime changes."
+            },
+            _ => null
         };
     }
 
@@ -2658,6 +3203,189 @@ internal static class DecisionWindowService
             relics = run.relics,
             potions = run.potions
         };
+    }
+
+    private static object BuildRunAnalysis(RunPayload run)
+    {
+        var deck = run.deck;
+        var basicCards = deck.Where(card => string.Equals(card.rarity, "Basic", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var drawCards = deck.Where(IsDrawCard).ToArray();
+        var blockCards = deck.Where(IsBlockCard).ToArray();
+        var energyCards = deck.Where(IsEnergyGenerationCard).ToArray();
+        var exhaustCards = deck.Where(IsExhaustCard).ToArray();
+        var powerCards = deck.Where(card => string.Equals(card.card_type, "Power", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var fixedCostCards = deck.Where(card => !card.costs_x && card.energy_cost >= 0).ToArray();
+        var cardsSeenByTurnFour = Math.Min(deck.Length, 20);
+        var signals = new List<string>();
+        if (deck.Length >= 30)
+        {
+            signals.Add("large_deck_30_plus");
+        }
+
+        if (basicCards.Length >= 7)
+        {
+            signals.Add("many_basic_cards_7_plus");
+        }
+
+        if (deck.Count(card => string.Equals(card.card_type, "Curse", StringComparison.OrdinalIgnoreCase)) > 0)
+        {
+            signals.Add("contains_curse");
+        }
+
+        if (drawCards.Length == 0 && deck.Length >= 20)
+        {
+            signals.Add("no_explicit_draw_in_20_plus_card_deck");
+        }
+
+        return new
+        {
+            analysis_scope = "factual_deck_shape_and_natural_draw_probabilities",
+            deck_size = deck.Length,
+            upgraded_count = deck.Count(card => card.upgraded),
+            removable_count = deck.Count(card => card.can_remove),
+            non_removable_count = deck.Count(card => !card.can_remove),
+            basic_card_count = basicCards.Length,
+            starter_strike_count = basicCards.Count(card => card.card_id.StartsWith("STRIKE_", StringComparison.OrdinalIgnoreCase)),
+            starter_defend_count = basicCards.Count(card => card.card_id.StartsWith("DEFEND_", StringComparison.OrdinalIgnoreCase)),
+            curse_count = deck.Count(card => string.Equals(card.card_type, "Curse", StringComparison.OrdinalIgnoreCase)),
+            type_counts = deck
+                .GroupBy(card => card.card_type, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase),
+            cost_curve = new
+            {
+                zero = fixedCostCards.Count(card => card.energy_cost == 0),
+                one = fixedCostCards.Count(card => card.energy_cost == 1),
+                two = fixedCostCards.Count(card => card.energy_cost == 2),
+                three_plus = fixedCostCards.Count(card => card.energy_cost >= 3),
+                x = deck.Count(card => card.costs_x),
+                average_non_x = fixedCostCards.Length == 0
+                    ? (double?)null
+                    : Math.Round(fixedCostCards.Average(card => card.energy_cost), 3)
+            },
+            role_counts = new
+            {
+                draw = drawCards.Length,
+                block = blockCards.Length,
+                energy_generation = energyCards.Length,
+                exhaust = exhaustCards.Length,
+                power = powerCards.Length,
+                vulnerable = deck.Count(IsVulnerableCard),
+                weak = deck.Count(IsWeakCard)
+            },
+            role_cards = new
+            {
+                draw = BuildRunCardGroups(drawCards),
+                block = BuildRunCardGroups(blockCards),
+                energy_generation = BuildRunCardGroups(energyCards),
+                exhaust = BuildRunCardGroups(exhaustCards),
+                powers = BuildRunCardGroups(powerCards),
+                basics = BuildRunCardGroups(basicCards)
+            },
+            natural_draw = new
+            {
+                assumption = "five cards per turn, no extra draw, no retain, no shuffle before the sample",
+                cards_seen_by_turn_4 = cardsSeenByTurnFour,
+                probability_any_power_by_turn_4 = ProbabilityAtLeastOne(deck.Length, powerCards.Length, cardsSeenByTurnFour),
+                probability_any_draw_card_by_turn_4 = ProbabilityAtLeastOne(deck.Length, drawCards.Length, cardsSeenByTurnFour),
+                power_cards = powerCards
+                    .GroupBy(card => new { card.card_id, card.name })
+                    .Select(group => new
+                    {
+                        group.Key.card_id,
+                        group.Key.name,
+                        copies = group.Count(),
+                        probability_by_turn_4 = ProbabilityAtLeastOne(deck.Length, group.Count(), cardsSeenByTurnFour)
+                    })
+                    .ToArray()
+            },
+            signals = signals.ToArray(),
+            limitations = new[]
+            {
+                "Role detection uses structured card fields plus current localized rules text.",
+                "This analysis reports deck facts and access probabilities; it does not rank cards or promise boss readiness."
+            }
+        };
+    }
+
+    private static object[] BuildRunCardGroups(IEnumerable<DeckCardPayload> cards)
+    {
+        return cards
+            .GroupBy(card => new { card.card_id, card.name })
+            .Select(group => new
+            {
+                group.Key.card_id,
+                group.Key.name,
+                count = group.Count(),
+                upgraded = group.Count(card => card.upgraded)
+            })
+            .OrderBy(item => item.card_id, StringComparer.Ordinal)
+            .Cast<object>()
+            .ToArray();
+    }
+
+    private static int? NaturalTurnsToSeeDeck(int deckSize, int cardsPerTurn)
+    {
+        return deckSize <= 0 || cardsPerTurn <= 0
+            ? null
+            : (int)Math.Ceiling(deckSize / (double)cardsPerTurn);
+    }
+
+    private static double ProbabilityAtLeastOne(int population, int successes, int draws)
+    {
+        if (population <= 0 || successes <= 0 || draws <= 0)
+        {
+            return 0;
+        }
+
+        successes = Math.Min(population, successes);
+        draws = Math.Min(population, draws);
+        if (draws > population - successes)
+        {
+            return 1;
+        }
+
+        var missProbability = 1d;
+        for (var index = 0; index < draws; index++)
+        {
+            missProbability *= (population - successes - index) / (double)(population - index);
+        }
+
+        return Math.Round(1d - missProbability, 4);
+    }
+
+    private static bool IsDrawCard(DeckCardPayload card)
+    {
+        return ContainsAny(card.rules_text, "Draw", "抽");
+    }
+
+    private static bool IsBlockCard(DeckCardPayload card)
+    {
+        return card.keywords.Any(keyword => ContainsAny(keyword, "Block", "格挡")) ||
+            ContainsAny(card.rules_text, "Block", "格挡");
+    }
+
+    private static bool IsEnergyGenerationCard(DeckCardPayload card)
+    {
+        var text = card.rules_text;
+        return (ContainsAny(text, "Gain", "获得") && ContainsAny(text, "Energy", "能量")) ||
+            (text.Contains("energyIcons", StringComparison.OrdinalIgnoreCase) && ContainsAny(text, "Gain", "获得"));
+    }
+
+    private static bool IsExhaustCard(DeckCardPayload card)
+    {
+        return card.keywords.Concat(card.mods).Any(value => ContainsAny(value, "Exhaust", "消耗"));
+    }
+
+    private static bool IsVulnerableCard(DeckCardPayload card)
+    {
+        return card.keywords.Any(keyword => ContainsAny(keyword, "Vulnerable", "易伤")) ||
+            ContainsAny(card.rules_text, "Vulnerable", "易伤");
+    }
+
+    private static bool IsWeakCard(DeckCardPayload card)
+    {
+        return card.keywords.Any(keyword => ContainsAny(keyword, "Weak", "虚弱")) ||
+            ContainsAny(card.rules_text, "Weak", "虚弱");
     }
 
     private static Dictionary<string, object?> BuildKnowledge(GameStatePayload state, bool includeRelevantGameData)
@@ -2853,7 +3581,7 @@ internal static class DecisionWindowService
                 "is_x_cost", "is_x_star_cost", "damage", "block", "hit_count", "powers_applied",
                 "cards_draw", "energy_gain", "hp_loss", "keywords", "tags", "can_remove"
             },
-            "monsters" => new[] { "id", "name", "type", "current_hp", "max_hp", "block", "intent", "move_id", "intents", "powers", "moves", "damage_values", "block_values" },
+            "monsters" => new[] { "id", "name", "type", "current_hp", "max_hp", "block", "intent", "move_id", "intents", "powers", "moves", "state_machine", "numeric_parameters", "damage_values", "block_values", "mechanics", "planning_notes", "data_completeness", "data_source_notes" },
             "powers" => new[] { "id", "name", "description", "type", "stack_type", "amount", "is_debuff" },
             "relics" => new[] { "id", "name", "description", "rarity", "stack", "is_melted", "price" },
             "potions" => new[] { "id", "name", "description", "rarity", "usage", "target", "can_use", "can_discard", "price" },
@@ -2906,7 +3634,19 @@ internal static class DecisionWindowService
 
             foreach (var (id, item) in sourceIndex)
             {
-                targetIndex[id] = item;
+                if (!targetIndex.TryGetValue(id, out var existing))
+                {
+                    targetIndex[id] = item;
+                    continue;
+                }
+
+                var merged = new Dictionary<string, object?>(existing, StringComparer.Ordinal);
+                foreach (var (field, value) in item)
+                {
+                    merged[field] = value;
+                }
+
+                targetIndex[id] = merged;
             }
         }
     }
@@ -2927,7 +3667,10 @@ internal static class DecisionWindowService
         AddModelCollection("events", "AllEvents");
         AddModelCollection("events", "AllAncients");
         AddModelCollection("powers", "AllPowers");
+        AddModelCollection("encounters", "AllEncounters");
+        AddModelCollection("enchantments", "DebugEnchantments");
         AddCorePowerData(indexes);
+        AddCoreMonsterData(indexes);
 
         _modelDbGameDataIndex = indexes;
         return _modelDbGameDataIndex;
@@ -2992,9 +3735,9 @@ internal static class DecisionWindowService
                 break;
             case "monsters":
                 item["type"] = ReadModelValue(model, "Type")?.ToString();
-                item["min_hp"] = ReadModelValue(model, "MinHp");
-                item["max_hp"] = ReadModelValue(model, "MaxHp");
-                item["moves"] = ReadMoveSummaries(model);
+                item["min_hp"] = ReadModelValue(model, "MinInitialHp") ?? ReadModelValue(model, "MinHp");
+                item["max_hp"] = ReadModelValue(model, "MaxInitialHp") ?? ReadModelValue(model, "MaxHp");
+                AddMonsterStateMachineFields(item, model);
                 break;
             case "relics":
                 item["rarity"] = ReadModelValue(model, "Rarity")?.ToString();
@@ -3108,6 +3851,234 @@ internal static class DecisionWindowService
             .ToArray();
     }
 
+    private static void AddMonsterStateMachineFields(Dictionary<string, object?> item, object model)
+    {
+        if (model is not MonsterModel canonical)
+        {
+            item["moves"] = ReadMoveSummaries(model);
+            item["data_completeness"] = "state_machine_unavailable";
+            return;
+        }
+
+        try
+        {
+            var monster = canonical.ToMutable();
+            var generateMethod = monster.GetType().GetMethod(
+                "GenerateMoveStateMachine",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            var machine = generateMethod?.Invoke(monster, null) as MonsterMoveStateMachine;
+            if (machine == null)
+            {
+                item["moves"] = Array.Empty<object>();
+                item["data_completeness"] = "state_machine_unavailable";
+                item["data_source_notes"] = "The runtime model did not return a move state machine.";
+                return;
+            }
+
+            var initialState = ReadPrivateMember(machine, "_initialState") as MonsterState;
+            var states = machine.States.Values
+                .Distinct()
+                .OrderBy(state => state.Id, StringComparer.Ordinal)
+                .Select(BuildMonsterStatePayload)
+                .ToArray();
+            var moves = states
+                .Where(state => state.TryGetValue("is_move", out var isMove) && isMove is true)
+                .ToArray();
+
+            item["moves"] = moves;
+            item["state_machine"] = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["schema_version"] = 1,
+                ["source"] = "runtime_generate_move_state_machine",
+                ["initial_state_id"] = initialState?.Id,
+                ["states"] = states,
+                ["state_count"] = states.Length,
+                ["move_count"] = moves.Length,
+                ["conditions_are_live_delegates"] = true
+            };
+            item["numeric_parameters"] = ReadMonsterNumericParameters(monster);
+            item["data_completeness"] = "runtime_state_machine";
+            item["data_source_notes"] = "Generated from the running game's MonsterMoveStateMachine, intent delegates, branch cooldowns, and repeat constraints.";
+        }
+        catch (Exception ex)
+        {
+            item["moves"] = ReadMoveSummaries(model);
+            item["data_completeness"] = "state_machine_unavailable";
+            item["data_source_notes"] = $"Runtime state-machine generation failed: {ex.GetBaseException().Message}";
+        }
+    }
+
+    private static Dictionary<string, object?> BuildMonsterStatePayload(MonsterState state)
+    {
+        var result = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = state.Id,
+            ["state_type"] = state.GetType().Name,
+            ["is_move"] = state.IsMove,
+            ["can_transition_away"] = state.CanTransitionAway,
+            ["appears_in_logs"] = state.ShouldAppearInLogs
+        };
+
+        if (state is MoveState move)
+        {
+            result["must_perform_once"] = move.MustPerformOnceBeforeTransitioning;
+            result["follow_up_state_id"] = move.FollowUpState?.Id ?? move.FollowUpStateId;
+            result["intents"] = move.Intents.Select(BuildStaticIntentPayload).ToArray();
+            return result;
+        }
+
+        if (state is ConditionalBranchState conditional)
+        {
+            var branches = ReadPrivateMember(conditional, "States") as System.Collections.IEnumerable;
+            result["branches"] = branches == null
+                ? Array.Empty<object>()
+                : branches.Cast<object>().Select(BuildConditionalBranchPayload).ToArray();
+            return result;
+        }
+
+        if (state is RandomBranchState random)
+        {
+            result["branches"] = random.States
+                .Select(branch => BuildRandomBranchPayload(branch))
+                .ToArray();
+        }
+
+        return result;
+    }
+
+    private static Dictionary<string, object?> BuildStaticIntentPayload(AbstractIntent intent)
+    {
+        var result = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["intent_type"] = intent.IntentType.ToString(),
+            ["runtime_type"] = intent.GetType().Name
+        };
+
+        if (intent is AttackIntent attack)
+        {
+            decimal? baseDamage = null;
+            try
+            {
+                baseDamage = attack.DamageCalc?.Invoke();
+            }
+            catch
+            {
+            }
+
+            result["base_damage_per_hit"] = baseDamage;
+            result["hits"] = attack.Repeats;
+            result["base_total_damage"] = baseDamage.HasValue ? baseDamage.Value * attack.Repeats : null;
+        }
+
+        if (intent is StatusIntent status)
+        {
+            result["status_card_count"] = status.CardCount;
+        }
+
+        return result;
+    }
+
+    private static Dictionary<string, object?> BuildConditionalBranchPayload(object branch)
+    {
+        var condition = ReadPrivateMember(branch, "_conditionalLambda") as Delegate;
+        return new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["target_state_id"] = ReadPrivateMember(branch, "id")?.ToString(),
+            ["condition_source"] = DescribeDelegate(condition),
+            ["condition_canonical_default"] = SafeInvokeDelegate(condition)
+        };
+    }
+
+    private static Dictionary<string, object?> BuildRandomBranchPayload(object branch)
+    {
+        var weight = ReadPrivateMember(branch, "weightLambda") as Delegate;
+        return new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["target_state_id"] = ReadPrivateMember(branch, "stateId")?.ToString(),
+            ["cooldown"] = ReadPrivateMember(branch, "cooldown"),
+            ["max_times"] = ReadPrivateMember(branch, "maxTimes"),
+            ["repeat_type"] = ReadPrivateMember(branch, "repeatType")?.ToString(),
+            ["weight_source"] = DescribeDelegate(weight),
+            ["weight_canonical_default"] = SafeInvokeDelegate(weight)
+        };
+    }
+
+    private static Dictionary<string, object?> ReadMonsterNumericParameters(MonsterModel monster)
+    {
+        var result = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var property in monster.GetType().GetProperties(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public))
+        {
+            if (property.GetIndexParameters().Length > 0 ||
+                !IsSimpleNumericType(property.PropertyType) ||
+                !ContainsAny(property.Name, "Damage", "Repeat", "Count", "Amount", "Gain", "Threshold"))
+            {
+                continue;
+            }
+
+            try
+            {
+                result[property.Name] = property.GetValue(monster);
+            }
+            catch
+            {
+            }
+        }
+
+        return result;
+    }
+
+    private static bool IsSimpleNumericType(Type type)
+    {
+        var underlying = Nullable.GetUnderlyingType(type) ?? type;
+        return underlying == typeof(byte) || underlying == typeof(sbyte) ||
+            underlying == typeof(short) || underlying == typeof(ushort) ||
+            underlying == typeof(int) || underlying == typeof(uint) ||
+            underlying == typeof(long) || underlying == typeof(ulong) ||
+            underlying == typeof(float) || underlying == typeof(double) || underlying == typeof(decimal);
+    }
+
+    private static object? ReadPrivateMember(object source, string memberName)
+    {
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+        try
+        {
+            return source.GetType().GetProperty(memberName, flags)?.GetValue(source)
+                ?? source.GetType().GetField(memberName, flags)?.GetValue(source);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? DescribeDelegate(Delegate? callback)
+    {
+        if (callback == null)
+        {
+            return null;
+        }
+
+        return $"{callback.Method.DeclaringType?.FullName}.{callback.Method.Name}";
+    }
+
+    private static object? SafeInvokeDelegate(Delegate? callback)
+    {
+        if (callback == null || callback.Method.GetParameters().Length != 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return callback.DynamicInvoke();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static void AddCorePowerData(Dictionary<string, Dictionary<string, Dictionary<string, object?>>> indexes)
     {
         foreach (var item in new[]
@@ -3140,6 +4111,92 @@ internal static class DecisionWindowService
                 ["type"] = type
             };
         }
+    }
+
+    private static void AddCoreMonsterData(Dictionary<string, Dictionary<string, Dictionary<string, object?>>> indexes)
+    {
+        MergeCuratedMonster(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = "QUEEN",
+            ["name"] = "Queen / 女王",
+            ["type"] = "Boss",
+            ["description"] = "Act 3 boss encountered with Torch Head Amalgam. Runtime intent values remain authoritative for exact damage.",
+            ["data_completeness"] = "curated_partial",
+            ["data_source_notes"] = "Observed v0.107.1 behavior; exact move base values and full RNG cycle are not available from ModelDb reflection.",
+            ["mechanics"] = new[]
+            {
+                "Applies long-duration Frail, Weak, and Vulnerable.",
+                "Chains of Binding can give Bound to early drawn cards, limiting Bound cards to one play per turn.",
+                "Enrage turns increase Strength; observed multi-hit pressure escalated from 45 to 60 to 75 total damage as Strength rose.",
+                "Fought alongside TORCH_HEAD_AMALGAM, whose continued attacks materially shorten the damage race."
+            },
+            ["planning_notes"] = new[]
+            {
+                "Treat the Torch Head as a priority target; a practical planning target is defeating it by turns 4-5.",
+                "Re-read playability after every card because Bound can invalidate the rest of a planned line.",
+                "Do not infer future exact damage from this curated record; use live intents and powers."
+            },
+            ["moves"] = new object[]
+            {
+                new { id = "ENRAGE_MOVE", effect = "Strength scaling / buff turn", exact_values = (object?)null },
+                new { id = "OFF_WITH_YOUR_HEAD_MOVE", effect = "Multi-hit attack", exact_values = (object?)null },
+                new { id = "EXECUTION_MOVE", effect = "Attack", exact_values = (object?)null }
+            }
+        });
+
+        MergeCuratedMonster(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["id"] = "TORCH_HEAD_AMALGAM",
+            ["name"] = "Torch Head Amalgam / 火炬头聚合体",
+            ["type"] = "BossMinion",
+            ["description"] = "Queen encounter add that repeatedly contributes attack intent while the Queen scales.",
+            ["data_completeness"] = "curated_partial",
+            ["data_source_notes"] = "Observed v0.107.1 behavior; ModelDb does not currently expose a complete move table.",
+            ["mechanics"] = new[]
+            {
+                "Adds recurring incoming damage beside the Queen.",
+                "Leaving it alive consumes HP, Block, potions, and setup turns while the Queen gains Strength."
+            },
+            ["planning_notes"] = new[]
+            {
+                "Focus target and plan to defeat it by turns 4-5; still alive after turn 6 is a major readiness warning.",
+                "Use live move_id/intents for exact damage because the static move table is incomplete."
+            },
+            ["moves"] = Array.Empty<object>()
+        });
+
+        void MergeCuratedMonster(Dictionary<string, object?> curated)
+        {
+            var id = curated["id"]?.ToString();
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                return;
+            }
+
+            if (!indexes.TryGetValue("monsters", out var monsterIndex) || !TryGetIndexedItem(monsterIndex, id, out var existing))
+            {
+                AddIndexedItem(indexes, "monsters", id, curated);
+                return;
+            }
+
+            foreach (var (field, value) in curated)
+            {
+                if (!existing.TryGetValue(field, out var current) || IsEmptyGameDataValue(current))
+                {
+                    existing[field] = value;
+                }
+            }
+        }
+    }
+
+    private static bool IsEmptyGameDataValue(object? value)
+    {
+        if (value == null || value is string text && string.IsNullOrWhiteSpace(text))
+        {
+            return true;
+        }
+
+        return value is System.Collections.ICollection collection && collection.Count == 0;
     }
 
     private static Dictionary<string, Dictionary<string, Dictionary<string, object?>>> BuildVisibleGameDataIndex(GameStatePayload state)
@@ -4181,6 +5238,36 @@ internal sealed class DecisionActRequest
     public string? client_note { get; init; }
 }
 
+internal sealed class DecisionPreviewRequest
+{
+    public string? decision_id { get; init; }
+
+    public string? action_id { get; init; }
+}
+
+internal sealed class DecisionPreviewResponsePayload
+{
+    public string decision_id { get; init; } = string.Empty;
+
+    public string action_id { get; init; } = string.Empty;
+
+    public string kind { get; init; } = string.Empty;
+
+    public bool mutation_performed { get; init; }
+
+    public bool complete { get; init; }
+
+    public bool incomplete { get; init; }
+
+    public string source { get; init; } = string.Empty;
+
+    public object? preview { get; init; }
+
+    public object? coverage { get; init; }
+
+    public string[] limitations { get; init; } = Array.Empty<string>();
+}
+
 internal sealed class DecisionCurrentPayload
 {
     public bool available { get; init; }
@@ -4264,6 +5351,12 @@ internal sealed class DecisionActResponsePayload
 
     public string previous_decision_id { get; init; } = string.Empty;
 
+    public object? result_delta { get; init; }
+
+    public long action_trace_cursor { get; init; }
+
+    public ActionTracePayload? action_trace { get; init; }
+
     public DecisionWindowPayload? next_decision { get; init; }
 }
 
@@ -4286,6 +5379,71 @@ internal sealed class GameDataLookupPayload
     public Dictionary<string, object?> items { get; init; } = new();
 
     public Dictionary<string, object?> metadata { get; init; } = new();
+}
+
+internal sealed class GameDataSearchRequest
+{
+    public string? query { get; init; }
+
+    public string[]? collections { get; init; }
+
+    public int? limit { get; init; }
+}
+
+internal sealed class GameDataSearchPayload
+{
+    public string query { get; init; } = string.Empty;
+
+    public string[] collections { get; init; } = Array.Empty<string>();
+
+    public GameDataSearchItemPayload[] matches { get; init; } = Array.Empty<GameDataSearchItemPayload>();
+
+    public string[] available_collections { get; init; } = Array.Empty<string>();
+
+    public Dictionary<string, object?> metadata { get; init; } = new();
+}
+
+internal sealed class GameDataSearchItemPayload
+{
+    public string collection { get; init; } = string.Empty;
+
+    public string id { get; init; } = string.Empty;
+
+    public string? name { get; init; }
+
+    public string? model_type { get; init; }
+
+    public string? description { get; init; }
+
+    public int match_rank { get; init; }
+}
+
+internal sealed class GameDataIdListPayload
+{
+    public string collection { get; init; } = string.Empty;
+
+    public string? query { get; init; }
+
+    public int offset { get; init; }
+
+    public int limit { get; init; }
+
+    public int total { get; init; }
+
+    public GameDataIdItemPayload[] items { get; init; } = Array.Empty<GameDataIdItemPayload>();
+
+    public string[] available_collections { get; init; } = Array.Empty<string>();
+
+    public Dictionary<string, object?> metadata { get; init; } = new();
+}
+
+internal sealed class GameDataIdItemPayload
+{
+    public string id { get; init; } = string.Empty;
+
+    public string? name { get; init; }
+
+    public string? model_type { get; init; }
 }
 
 internal sealed class GameDataExportPayload

@@ -38,6 +38,21 @@ _DEFAULT_ACTION_TIMEOUT = 30.0
 _DEFAULT_MAX_RETRIES = 2
 _RETRY_BACKOFF_BASE = 0.5
 
+REQUIRED_PROTOCOL_VERSION = "2026-07-18-v2-draft"
+MIN_STATE_VERSION = 12
+MIN_DECISION_VERSION = 4
+REQUIRED_CAPABILITIES = (
+    "decision_v2",
+    "exact_character_ascension",
+    "action_result_delta",
+    "preview_action",
+    "action_trace",
+    "monster_state_machine_export",
+    "unified_trigger_progress",
+    "run_analysis",
+    "selection_runtime_preview",
+)
+
 
 @dataclass(slots=True)
 class Sts2ApiError(RuntimeError):
@@ -54,6 +69,53 @@ class Sts2ApiError(RuntimeError):
         if self.details is not None:
             parts.append(f"details={json.dumps(self.details, ensure_ascii=False)}")
         return " | ".join(parts)
+
+
+@dataclass(slots=True)
+class Sts2CapabilityError(RuntimeError):
+    missing: list[str]
+    health: dict[str, Any]
+
+    def __str__(self) -> str:
+        return (
+            "Incompatible STS2 AI MCP Mod contract: "
+            + ", ".join(self.missing)
+            + ". Rebuild/install the matching Mod or set STS2_MCP_ALLOW_INCOMPATIBLE=1 for an explicit local override."
+        )
+
+
+def evaluate_runtime_contract(health: dict[str, Any]) -> dict[str, Any]:
+    capabilities = health.get("capabilities")
+    if not isinstance(capabilities, dict):
+        capabilities = {}
+
+    missing: list[str] = []
+    protocol_version = str(health.get("protocol_version", "")).strip()
+    if protocol_version != REQUIRED_PROTOCOL_VERSION:
+        missing.append(
+            f"protocol_version={protocol_version or '<missing>'} (required {REQUIRED_PROTOCOL_VERSION})"
+        )
+
+    state_version = int(health.get("state_version") or 0)
+    if state_version < MIN_STATE_VERSION:
+        missing.append(f"state_version={state_version} (required >= {MIN_STATE_VERSION})")
+
+    decision_version = int(health.get("decision_version") or 0)
+    if decision_version < MIN_DECISION_VERSION:
+        missing.append(f"decision_version={decision_version} (required >= {MIN_DECISION_VERSION})")
+
+    for capability in REQUIRED_CAPABILITIES:
+        if capabilities.get(capability) is not True:
+            missing.append(f"capability:{capability}")
+
+    return {
+        "compatible": not missing,
+        "missing": missing,
+        "required_protocol_version": REQUIRED_PROTOCOL_VERSION,
+        "minimum_state_version": MIN_STATE_VERSION,
+        "minimum_decision_version": MIN_DECISION_VERSION,
+        "required_capabilities": list(REQUIRED_CAPABILITIES),
+    }
 
 
 class Sts2Client:
@@ -75,6 +137,13 @@ class Sts2Client:
 
     def get_health(self) -> dict[str, Any]:
         return self._request("GET", "/health")
+
+    def require_runtime_contract(self) -> dict[str, Any]:
+        health = self.get_health()
+        contract = evaluate_runtime_contract(health)
+        if not contract["compatible"]:
+            raise Sts2CapabilityError(missing=list(contract["missing"]), health=health)
+        return {**health, "runtime_contract": contract}
 
     def get_state(self) -> dict[str, Any]:
         return self._request("GET", "/state")
@@ -144,6 +213,20 @@ class Sts2Client:
             is_action=True,
         )
 
+    def preview_action(self, *, decision_id: str, action_id: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/v2/decision/preview",
+            payload={
+                "decision_id": decision_id,
+                "action_id": action_id,
+            },
+        )
+
+    def get_action_trace(self, *, after_sequence: int = 0) -> dict[str, Any]:
+        query = parse.urlencode({"after_sequence": max(0, int(after_sequence))})
+        return self._request("GET", f"/v2/trace/actions?{query}")
+
     def lookup_game_data(
         self,
         *,
@@ -158,6 +241,40 @@ class Sts2Client:
                 "fields": fields or [],
             },
         )
+
+    def search_game_data(
+        self,
+        *,
+        query: str,
+        collections: list[str] | None = None,
+        limit: int = 25,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/v2/data/search",
+            payload={
+                "query": query,
+                "collections": collections or [],
+                "limit": max(1, min(int(limit), 100)),
+            },
+        )
+
+    def list_model_ids(
+        self,
+        *,
+        collection: str,
+        query: str | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "collection": collection,
+            "offset": max(0, int(offset)),
+            "limit": max(1, min(int(limit), 250)),
+        }
+        if query:
+            params["query"] = query
+        return self._request("GET", f"/v2/data/ids?{parse.urlencode(params)}")
 
     def export_game_data(self) -> dict[str, Any]:
         return self._request(
@@ -561,10 +678,11 @@ class Sts2Client:
             },
         )
 
-    def select_character(self, option_index: int) -> dict[str, Any]:
+    def select_character(self, character_id: str, ascension: int) -> dict[str, Any]:
         return self.execute_action(
             "select_character",
-            option_index=option_index,
+            character_id=character_id,
+            ascension=ascension,
             client_context={
                 "source": "mcp",
                 "tool_name": "select_character",
@@ -672,6 +790,8 @@ class Sts2Client:
         card_index: int | None = None,
         target_index: int | None = None,
         option_index: int | None = None,
+        character_id: str | None = None,
+        ascension: int | None = None,
         command: str | None = None,
         client_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -683,6 +803,8 @@ class Sts2Client:
                 "card_index": card_index,
                 "target_index": target_index,
                 "option_index": option_index,
+                "character_id": character_id,
+                "ascension": ascension,
                 "command": command,
                 "client_context": client_context,
             },

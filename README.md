@@ -19,8 +19,12 @@ The v2 protocol is experimental but usable for local testing:
 
 - `GET /v2/decision/current`
 - `POST /v2/decision/wait`
+- `POST /v2/decision/preview`
 - `POST /v2/decision/act`
+- `GET /v2/trace/actions`
 - `POST /v2/data/lookup`
+- `POST /v2/data/search`
+- `GET /v2/data/ids`
 - `POST /v2/data/export`
 
 Normal MCP play should use only:
@@ -28,11 +32,17 @@ Normal MCP play should use only:
 - `health_check`
 - `wait_for_decision`
 - `get_current_decision`
+- `preview_action`
+- `preview_action_plan`
 - `take_action`
+- `get_action_trace`
 - `execute_action_plan`
 - `select_cards`
+- `select_character`
 - `lookup_game_data`
 - `append_decision_note`
+
+When `STS2_ENABLE_DEBUG_ACTIONS=1`, MCP additionally exposes the read-only `search_game_data` and `list_model_ids` discovery tools alongside `run_console_command`. They search live ModelDb data and remain absent from the normal tool surface.
 
 ## Compatibility
 
@@ -117,7 +127,24 @@ HTTP MCP:
 ./scripts/start-mcp-network.sh --host 127.0.0.1 --port 8765 --path /mcp
 ```
 
-Static card, monster, power, relic, potion, and event metadata is cached once per game version under `mcp_server/data/versions/`. Pre-generate the running version with:
+The game and matching Mod must be reachable before MCP startup. Startup enforces the v2 protocol/state/decision capability contract and exits on an old or mismatched Mod; use `STS2_MCP_ALLOW_INCOMPATIBLE=1` only for an explicit local compatibility experiment.
+
+On the character-select screen, the preferred `ai_safe_v2`, guided, and full action is a single call with both values: `select_character(character_id="IRONCLAD", ascension=10)`. The Mod validates the exact level against the currently unlocked range; callers no longer need to select a character and then issue repeated ascension increments.
+
+The AI-safe v2 MCP also exposes `preview_action(decision_id, action_id)`, read-only
+`preview_action_plan(decision_id, steps)`, and `get_action_trace(after_sequence)`.
+Plan preview checks a deterministic combat prefix against the current energy, stars,
+known card-play limits, stable references, and sequential direct damage/Block without
+mutating the game. Monster lookups carry the generated engine move state machine,
+while relics and powers expose the same structured `trigger_progress` schema.
+
+Every run-backed decision now includes factual `context.run_analysis` deck-shape,
+role-density, cost-curve, and natural-access metrics. Special card selections expose
+live resolved text/dynamic values plus recognized consequence and deck-interaction
+previews, so callers do not need to substitute a static model value for a runtime
+curse amount.
+
+Static card, monster, encounter, enchantment, power, relic, potion, and event metadata is cached once per game version under `mcp_server/data/versions/`. Pre-generate the running version with:
 
 ```bash
 python3 scripts/sync-game-data.py

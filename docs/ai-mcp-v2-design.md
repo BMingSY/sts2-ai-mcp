@@ -92,7 +92,7 @@ Initial phases:
 | Phase | Meaning |
 | --- | --- |
 | `main_menu` | Main menu and run setup decisions |
-| `character_select` | Character, ascension, embark, timeline/lobby setup |
+| `character_select` | Atomic character + exact ascension selection, embark, timeline/lobby setup |
 | `combat` | Player combat action window |
 | `combat_selection` | Combat-created card selection, upgrade selection, or curse choice |
 | `map` | Route node choice |
@@ -292,9 +292,13 @@ The AI-safe MCP profile should expose only:
 - `health_check`
 - `wait_for_decision`
 - `get_current_decision`
+- `preview_action`
+- `preview_action_plan`
 - `take_action`
+- `get_action_trace`
 - `execute_action_plan`
 - `select_cards`
+- `select_character`
 - `lookup_game_data`
 - `append_decision_note` or automatic decision logging through `take_action`
 
@@ -335,6 +339,8 @@ Decision windows should be easy to paste into run logs. Include stable summary f
 - result status
 
 The Mod should return enough post-action state to log whether the action completed or whether the client must wait again.
+
+Post-action responses include a conservative `result_delta` built from the stable pre/post states. Intermediate engine triggers must remain explicitly incomplete until the Mod subscribes to engine action/event hooks; they must not be reconstructed as if authoritative.
 
 ---
 

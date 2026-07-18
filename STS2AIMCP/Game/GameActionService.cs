@@ -2551,49 +2551,108 @@ internal static class GameActionService
             });
         }
 
-        if (request.option_index == null)
+        var requestedCharacterId = request.character_id?.Trim();
+        if (!string.IsNullOrWhiteSpace(requestedCharacterId) && request.ascension == null)
         {
-            throw new ApiException(400, "invalid_request", "select_character requires option_index.", new
+            throw new ApiException(400, "invalid_request", "select_character requires ascension when character_id is used.", new
+            {
+                action = "select_character",
+                character_id = requestedCharacterId
+            });
+        }
+
+        if (request.option_index == null && string.IsNullOrWhiteSpace(requestedCharacterId))
+        {
+            throw new ApiException(400, "invalid_request", "select_character requires character_id and ascension (option_index remains supported for legacy clients).", new
             {
                 action = "select_character"
             });
         }
 
         var buttons = GameStateService.GetCharacterSelectButtons(currentScreen);
-        if (request.option_index < 0 || request.option_index >= buttons.Count)
+        var optionIndex = !string.IsNullOrWhiteSpace(requestedCharacterId)
+            ? buttons
+                .Select((candidate, index) => new { candidate, index })
+                .Where(item => string.Equals(item.candidate.Character.Id.Entry, requestedCharacterId, StringComparison.OrdinalIgnoreCase))
+                .Select(item => (int?)item.index)
+                .FirstOrDefault()
+            : request.option_index;
+
+        if (optionIndex == null || optionIndex < 0 || optionIndex >= buttons.Count)
         {
             throw new ApiException(409, "invalid_target", "option_index is out of range.", new
             {
                 action = "select_character",
-                option_index = request.option_index,
+                character_id = requestedCharacterId,
+                option_index = optionIndex,
                 option_count = buttons.Count
             });
         }
 
-        var button = buttons[request.option_index.Value];
+        var button = buttons[optionIndex.Value];
         if (button.IsLocked)
         {
             throw new ApiException(409, "invalid_target", "The selected character is locked.", new
             {
                 action = "select_character",
-                option_index = request.option_index,
-                character_id = button.Character.Id.Entry
-            });
-        }
-
-        if (!button.IsEnabled || !button.IsVisibleInTree())
-        {
-            throw new ApiException(409, "invalid_target", "The selected character cannot be chosen right now.", new
-            {
-                action = "select_character",
-                option_index = request.option_index,
+                option_index = optionIndex,
                 character_id = button.Character.Id.Entry
             });
         }
 
         var previousCharacterId = characterSelectScreen.Lobby.LocalPlayer.character.Id.Entry;
-        button.Select();
-        var stable = await WaitForCharacterSelectionTransitionAsync(characterSelectScreen, button.Character.Id.Entry, previousCharacterId, TimeSpan.FromSeconds(5));
+        var selectingCurrentCharacter = string.Equals(previousCharacterId, button.Character.Id.Entry, StringComparison.OrdinalIgnoreCase);
+        if ((!button.IsEnabled || !button.IsVisibleInTree()) && !selectingCurrentCharacter)
+        {
+            throw new ApiException(409, "invalid_target", "The selected character cannot be chosen right now.", new
+            {
+                action = "select_character",
+                option_index = optionIndex,
+                character_id = button.Character.Id.Entry
+            });
+        }
+
+        var maxAscension = characterSelectScreen.Lobby.NetService.Type.IsMultiplayer()
+            ? characterSelectScreen.Lobby.MaxAscension
+            : GameStateService.ResolveCharacterMaxAscension(button.Character);
+        if (request.ascension is < 0 || request.ascension > maxAscension)
+        {
+            throw new ApiException(409, "invalid_target", "ascension is outside the unlocked range.", new
+            {
+                action = "select_character",
+                character_id = button.Character.Id.Entry,
+                ascension = request.ascension,
+                min_ascension = 0,
+                max_ascension = maxAscension
+            });
+        }
+
+        if (!selectingCurrentCharacter)
+        {
+            button.Select();
+        }
+
+        var characterStable = await WaitForCharacterSelectionTransitionAsync(
+            characterSelectScreen,
+            button.Character.Id.Entry,
+            previousCharacterId,
+            TimeSpan.FromSeconds(5));
+        var ascensionStable = request.ascension == null;
+        if (characterStable && request.ascension.HasValue)
+        {
+            var targetAscension = request.ascension.Value;
+            if (characterSelectScreen.Lobby.Ascension != targetAscension)
+            {
+                characterSelectScreen.Lobby.SyncAscensionChange(targetAscension);
+            }
+
+            ascensionStable = await WaitForLobbyAscensionTransitionAsync(
+                characterSelectScreen,
+                targetAscension,
+                TimeSpan.FromSeconds(5));
+        }
+
+        var stable = characterStable && ascensionStable;
 
         return new ActionResponsePayload
         {
@@ -2616,22 +2675,41 @@ internal static class GameActionService
             });
         }
 
-        if (request.option_index == null)
+        var requestedCharacterId = request.character_id?.Trim();
+        if (request.option_index == null && string.IsNullOrWhiteSpace(requestedCharacterId))
         {
-            throw new ApiException(400, "invalid_request", "select_character requires option_index.", new
+            throw new ApiException(400, "invalid_request", "select_character requires character_id (option_index remains supported for legacy clients).", new
             {
                 action = "select_character"
             });
         }
 
         var characters = GameStateService.GetMultiplayerLobbyCharacters();
-        if (request.option_index < 0 || request.option_index >= characters.Length)
+        var optionIndex = !string.IsNullOrWhiteSpace(requestedCharacterId)
+            ? characters
+                .Select((candidate, index) => new { candidate, index })
+                .Where(item => string.Equals(item.candidate.Id.Entry, requestedCharacterId, StringComparison.OrdinalIgnoreCase))
+                .Select(item => (int?)item.index)
+                .FirstOrDefault()
+            : request.option_index;
+        if (optionIndex == null || optionIndex < 0 || optionIndex >= characters.Length)
         {
             throw new ApiException(409, "invalid_target", "option_index is out of range.", new
             {
                 action = "select_character",
-                option_index = request.option_index,
+                character_id = requestedCharacterId,
+                option_index = optionIndex,
                 option_count = characters.Length
+            });
+        }
+
+        if (request.ascension is > 0)
+        {
+            throw new ApiException(409, "invalid_target", "This multiplayer test lobby does not expose ascension selection.", new
+            {
+                action = "select_character",
+                ascension = request.ascension,
+                max_ascension = 0
             });
         }
 
@@ -2650,8 +2728,8 @@ internal static class GameActionService
             }, retryable: true);
 
         var previousCharacterId = lobby.LocalPlayer.character.Id.Entry;
-        var currentCharacterId = characters[request.option_index.Value].Id.Entry;
-        paginator.SetIndex(request.option_index.Value);
+        var currentCharacterId = characters[optionIndex.Value].Id.Entry;
+        paginator.SetIndex(optionIndex.Value);
         var stable = await WaitForMultiplayerLobbyCharacterSelectionTransitionAsync(scene, currentCharacterId, previousCharacterId, TimeSpan.FromSeconds(5));
 
         return new ActionResponsePayload
@@ -4185,6 +4263,10 @@ internal sealed class ActionRequest
     public int? target_index { get; init; }
 
     public int? option_index { get; init; }
+
+    public string? character_id { get; init; }
+
+    public int? ascension { get; init; }
 
     public string? command { get; init; }
 

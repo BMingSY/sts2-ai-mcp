@@ -11,7 +11,58 @@ from typing import Any
 
 
 SNAPSHOT_SCHEMA_VERSION = 1
-DEFAULT_COLLECTIONS = ("cards", "monsters", "powers", "relics", "potions", "events")
+DEFAULT_COLLECTIONS = (
+    "cards",
+    "monsters",
+    "encounters",
+    "enchantments",
+    "powers",
+    "relics",
+    "potions",
+    "events",
+)
+
+CURATED_ITEM_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
+    "monsters": {
+        "QUEEN": {
+            "type": "Boss",
+            "description": "Act 3 boss encountered with Torch Head Amalgam. Runtime intent values remain authoritative for exact damage.",
+            "data_completeness": "curated_partial",
+            "data_source_notes": "Observed v0.107.1 behavior; exact move base values and full RNG cycle are not available from ModelDb reflection.",
+            "mechanics": [
+                "Applies long-duration Frail, Weak, and Vulnerable.",
+                "Chains of Binding can give Bound to early drawn cards, limiting Bound cards to one play per turn.",
+                "Enrage turns increase Strength; observed multi-hit pressure escalated from 45 to 60 to 75 total damage as Strength rose.",
+                "Fought alongside TORCH_HEAD_AMALGAM, whose continued attacks materially shorten the damage race.",
+            ],
+            "planning_notes": [
+                "Treat the Torch Head as a priority target; a practical planning target is defeating it by turns 4-5.",
+                "Re-read playability after every card because Bound can invalidate the rest of a planned line.",
+                "Do not infer future exact damage from this curated record; use live intents and powers.",
+            ],
+            "moves": [
+                {"id": "ENRAGE_MOVE", "effect": "Strength scaling / buff turn", "exact_values": None},
+                {"id": "OFF_WITH_YOUR_HEAD_MOVE", "effect": "Multi-hit attack", "exact_values": None},
+                {"id": "EXECUTION_MOVE", "effect": "Attack", "exact_values": None},
+            ],
+        },
+        "TORCH_HEAD_AMALGAM": {
+            "type": "BossMinion",
+            "description": "Queen encounter add that repeatedly contributes attack intent while the Queen scales.",
+            "data_completeness": "curated_partial",
+            "data_source_notes": "Observed v0.107.1 behavior; ModelDb does not currently expose a complete move table.",
+            "mechanics": [
+                "Adds recurring incoming damage beside the Queen.",
+                "Leaving it alive consumes HP, Block, potions, and setup turns while the Queen gains Strength.",
+            ],
+            "planning_notes": [
+                "Focus target and plan to defeat it by turns 4-5; still alive after turn 6 is a major readiness warning.",
+                "Use live move_id/intents for exact damage because the static move table is incomplete.",
+            ],
+            "moves": [],
+        },
+    },
+}
 
 
 class GameDataVersionError(RuntimeError):
@@ -74,6 +125,7 @@ class GameDataSnapshot:
                 "data_source": "mcp_versioned_cache",
                 "exported_at_utc": self.manifest.get("exported_at_utc"),
                 "content_hash": self.manifest.get("content_hash"),
+                "curated_overrides": self.manifest.get("curated_overrides", []),
             },
         }
 
@@ -157,6 +209,43 @@ class VersionedGameDataStore:
                 raise GameDataVersionError(
                     f"Snapshot content hash mismatch for {game_version!r}: expected {expected_hash}, found {actual_hash}."
                 )
+
+            applied_overrides: list[str] = []
+            for collection, collection_overrides in CURATED_ITEM_OVERRIDES.items():
+                collection_payload = collections.get(collection)
+                collection_index = indexes.get(collection)
+                if collection_payload is None or collection_index is None:
+                    continue
+                for item_id, override in collection_overrides.items():
+                    item = collection_index.get(item_id.lower())
+                    if not isinstance(item, dict):
+                        continue
+                    item_changed = False
+                    for field, value in override.items():
+                        current = item.get(field)
+                        if field in {"mechanics", "planning_notes"} and isinstance(value, list):
+                            existing = current if isinstance(current, list) else []
+                            merged = list(existing)
+                            for entry in value:
+                                if entry not in merged:
+                                    merged.append(entry)
+                            if merged != current:
+                                item[field] = merged
+                                item_changed = True
+                            continue
+
+                        if current is None or current == "" or current == [] or current == {}:
+                            item[field] = value
+                            item_changed = True
+
+                    if item_changed:
+                        applied_overrides.append(f"{collection}:{item_id}")
+
+            if applied_overrides:
+                manifest = {
+                    **manifest,
+                    "curated_overrides": applied_overrides,
+                }
 
             snapshot = GameDataSnapshot(
                 game_version=game_version,

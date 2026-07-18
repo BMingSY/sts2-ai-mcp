@@ -48,6 +48,7 @@ using MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Timeline;
 using MegaCrit.Sts2.addons.mega_text;
 
@@ -55,7 +56,7 @@ namespace STS2AIMCP.Game;
 
 internal static class GameStateService
 {
-    private const int StateVersion = 9;
+    internal const int StateVersion = 12;
     private const int AgentViewVersion = 1;
     private const int MaxCombatPileStacks = 120;
 
@@ -514,7 +515,8 @@ internal static class GameStateService
             {
                 name = "select_character",
                 requires_target = false,
-                requires_index = true
+                requires_index = false,
+                required_fields = new[] { "character_id", "ascension" }
             });
         }
 
@@ -1939,7 +1941,17 @@ internal static class GameStateService
         var enemyPayloads = enemies.Select((enemy, index) => BuildEnemyPayload(enemy, index)).ToArray();
         var incomingDamage = EstimateIncomingDamage(enemyPayloads);
         var unblockedDamage = Math.Max(0, incomingDamage - playerPayload.block);
-        var endTurnWillKillPlayer = incomingDamage > 0 && unblockedDamage >= playerPayload.current_hp;
+        var endTurnSimulation = SimulateEndTurnDamage(
+            enemyPayloads,
+            playerPayload.current_hp,
+            playerPayload.max_hp,
+            playerPayload.block,
+            me.PotionSlots
+                .Select((potion, index) => new { potion, index })
+                .Where(item => item.potion != null)
+                .Select(item => new AutomaticConsumableCandidate(item.index, item.potion!.Id.Entry))
+                .ToArray());
+        var endTurnWillKillPlayer = endTurnSimulation.will_kill_player;
         var turnCardPlayCounts = BuildTurnCardPlayCounts(combatState, me);
 
         return new CombatPayload
@@ -1960,6 +1972,7 @@ internal static class GameStateService
             incoming_damage = incomingDamage,
             unblocked_damage = unblockedDamage,
             end_turn_will_kill_player = endTurnWillKillPlayer,
+            end_turn_simulation = endTurnSimulation,
             lethal_risks = BuildCombatLethalRiskPayloads(
                 incomingDamage,
                 unblockedDamage,
@@ -1992,6 +2005,112 @@ internal static class GameStateService
             .SelectMany(enemy => enemy.intents)
             .Sum(intent => Math.Max(0, intent.total_damage ?? intent.damage ?? 0));
     }
+
+    private static EndTurnDamageSimulationPayload SimulateEndTurnDamage(
+        IReadOnlyList<CombatEnemyPayload> enemies,
+        int currentHp,
+        int maxHp,
+        int currentBlock,
+        IReadOnlyList<AutomaticConsumableCandidate> consumables)
+    {
+        var hp = currentHp;
+        var block = currentBlock;
+        var hitTimeline = new List<EndTurnHitPayload>();
+        var consumed = new List<AutomaticConsumablePayload>();
+        var fairies = new Queue<AutomaticConsumableCandidate>(consumables.Where(candidate =>
+            string.Equals(candidate.PotionId, "FAIRY_IN_A_BOTTLE", StringComparison.OrdinalIgnoreCase)));
+        var intentDamageComplete = true;
+
+        foreach (var enemy in enemies.Where(enemy => enemy.is_alive).OrderBy(enemy => enemy.index))
+        {
+            foreach (var intent in enemy.intents.OrderBy(intent => intent.index))
+            {
+                var isAttack = intent.intent_type.Contains("Attack", StringComparison.OrdinalIgnoreCase) ||
+                    intent.damage.HasValue || intent.total_damage.HasValue;
+                if (!isAttack)
+                {
+                    continue;
+                }
+
+                var hits = Math.Max(1, intent.hits ?? 1);
+                var declaredTotal = intent.total_damage ?? (intent.damage.HasValue ? intent.damage.Value * hits : (int?)null);
+                if (!declaredTotal.HasValue)
+                {
+                    intentDamageComplete = false;
+                    continue;
+                }
+
+                var perHit = intent.damage ?? (declaredTotal.Value / hits);
+                var remainder = intent.damage.HasValue ? 0 : declaredTotal.Value % hits;
+                for (var hit = 0; hit < hits && hp > 0; hit += 1)
+                {
+                    var incoming = Math.Max(0, perHit + (hit < remainder ? 1 : 0));
+                    var blockBefore = block;
+                    var hpBefore = hp;
+                    var blocked = Math.Min(block, incoming);
+                    block -= blocked;
+                    hp -= Math.Max(0, incoming - blocked);
+
+                    string? automaticConsumableId = null;
+                    int? reviveHp = null;
+                    if (hp <= 0 && fairies.Count > 0)
+                    {
+                        var fairy = fairies.Dequeue();
+                        automaticConsumableId = fairy.PotionId;
+                        reviveHp = Math.Max(1, (int)Math.Floor(maxHp * 0.30m));
+                        hp = reviveHp.Value;
+                        consumed.Add(new AutomaticConsumablePayload
+                        {
+                            slot_index = fairy.SlotIndex,
+                            item_id = fairy.PotionId,
+                            trigger = "lethal_hp_loss",
+                            restored_hp = reviveHp.Value
+                        });
+                    }
+
+                    hitTimeline.Add(new EndTurnHitPayload
+                    {
+                        sequence = hitTimeline.Count,
+                        enemy_index = enemy.index,
+                        enemy_id = enemy.enemy_id,
+                        move_id = enemy.move_id,
+                        intent_index = intent.index,
+                        hit_index = hit,
+                        incoming_damage = incoming,
+                        blocked_damage = blocked,
+                        hp_damage = Math.Max(0, incoming - blocked),
+                        block_before = blockBefore,
+                        block_after = block,
+                        hp_before = hpBefore,
+                        hp_after = hp,
+                        automatic_consumable_id = automaticConsumableId,
+                        revive_hp = reviveHp
+                    });
+                }
+            }
+        }
+
+        return new EndTurnDamageSimulationPayload
+        {
+            scope = "enemy_attack_intents_only",
+            intent_damage_complete = intentDamageComplete,
+            declared_incoming_damage = EstimateIncomingDamage(enemies),
+            starting_hp = currentHp,
+            starting_block = currentBlock,
+            hp_after = Math.Max(0, hp),
+            block_after = Math.Max(0, block),
+            will_kill_player = hp <= 0,
+            hit_timeline = hitTimeline.ToArray(),
+            automatic_consumables = consumed.ToArray(),
+            unmodeled_effects = new[]
+            {
+                "end_of_turn card, power, relic, orb, and room-script triggers",
+                "effects whose runtime intents do not expose numeric damage"
+            }
+        };
+    }
+
+    private readonly record struct AutomaticConsumableCandidate(int SlotIndex, string PotionId);
 
     private static CombatLethalRiskPayload[] BuildCombatLethalRiskPayloads(
         int incomingDamage,
@@ -2197,6 +2316,7 @@ internal static class GameStateService
         {
             character_id = player.Character.Id.Entry,
             character_name = player.Character.Title.GetFormattedText(),
+            ascension = ResolveRunAscension(runState),
             floor = runState.TotalFloor,
             current_hp = player.Creature.CurrentHp,
             max_hp = player.Creature.MaxHp,
@@ -2339,6 +2459,7 @@ internal static class GameStateService
         return new
         {
             character = run.character_name,
+            ascension = run.ascension,
             floor = run.floor,
             hp = $"{run.current_hp}/{run.max_hp}",
             gold = run.gold,
@@ -2350,6 +2471,14 @@ internal static class GameStateService
             relics = run.relics
                 .Select(relic => relic.is_melted ? $"{relic.name} (熔毁)" : relic.name)
                 .ToArray(),
+            relic_details = run.relics.Select(relic => new
+            {
+                id = relic.relic_id,
+                name = relic.name,
+                relic.stack,
+                relic.is_melted,
+                relic.trigger_progress
+            }).ToArray(),
             potions = run.potions.Select(potion => new
             {
                 i = potion.index,
@@ -2555,12 +2684,15 @@ internal static class GameStateService
             selected = characterSelect.selected_character_id,
             embark = characterSelect.can_embark,
             ascension = characterSelect.ascension,
+            max_ascension = characterSelect.max_ascension,
+            preferred_action = "select_character(character_id, ascension)",
             characters = characterSelect.characters.Select(character => new
             {
                 i = character.index,
                 line = character.is_random ? $"{character.name} (随机)" : character.name,
                 locked = character.is_locked,
-                selected = character.is_selected
+                selected = character.is_selected,
+                max_ascension = character.max_ascension
             }).ToArray()
         };
     }
@@ -2996,7 +3128,9 @@ internal static class GameStateService
         var values = new HashSet<string>(StringComparer.Ordinal);
         foreach (var memberName in new[]
         {
+            "Enchantment",
             "Enchantments",
+            "EnchantmentId",
             "Enchants",
             "Modifiers",
             "ModifierIds",
@@ -3082,7 +3216,7 @@ internal static class GameStateService
             yield break;
         }
 
-        foreach (var memberName in new[] { "Title", "Name", "Keyword", "Text", "Description", "Label" })
+        foreach (var memberName in new[] { "Title", "Name", "Keyword", "Text", "DynamicDescription", "Description", "Label" })
         {
             var memberValue = TryGetMemberValue(value, memberName);
             if (TryCoerceText(memberValue) is { Length: > 0 } memberText)
@@ -3468,7 +3602,10 @@ internal static class GameStateService
                     is_selected = button.IsRandom
                         ? selectedCharacterId == button.Character.Id.Entry
                         : selectedCharacterId == button.Character.Id.Entry,
-                    is_random = button.IsRandom
+                    is_random = button.IsRandom,
+                    max_ascension = lobby.NetService.Type.IsMultiplayer()
+                        ? lobby.MaxAscension
+                        : ResolveCharacterMaxAscension(button.Character)
                 }).ToArray()
             };
         }
@@ -3484,9 +3621,24 @@ internal static class GameStateService
                     name = button.Character.Title.GetFormattedText(),
                     is_locked = button.IsLocked,
                     is_selected = false,
-                    is_random = button.IsRandom
+                    is_random = button.IsRandom,
+                    max_ascension = ResolveCharacterMaxAscension(button.Character)
                 }).ToArray()
             };
+        }
+    }
+
+    internal static int ResolveCharacterMaxAscension(CharacterModel character)
+    {
+        try
+        {
+            return SaveManager.Instance.Progress.CharacterStats.TryGetValue(character.Id, out var stats)
+                ? Math.Max(0, stats.MaxAscension)
+                : 0;
+        }
+        catch
+        {
+            return 0;
         }
     }
 
@@ -3959,6 +4111,7 @@ internal static class GameStateService
             dynamic_vars = dynamicVars,
             keywords = keywords,
             mods = mods,
+            modifier_details = BuildCardModifierPayloads(card),
             affliction_id = affliction?.Id.Entry,
             affliction_name = affliction?.Title.GetFormattedText(),
             affliction_description = affliction?.DynamicDescription.GetFormattedText(),
@@ -4103,7 +4256,8 @@ internal static class GameStateService
                 description = GetPowerDescription(powerModel),
                 amount = amount,
                 is_debuff = isDebuff,
-                stack_type = powerModel.StackType.ToString()
+                stack_type = powerModel.StackType.ToString(),
+                trigger_progress = BuildTriggerProgress(powerModel, "power", powerModel.Id.Entry, false, powerModel.DisplayAmount)
             });
             index += 1;
         }
@@ -4382,9 +4536,301 @@ internal static class GameStateService
             relic_id = relic.Id.Entry,
             name = relic.Title.GetFormattedText(),
             description = GetDynamicFormattedTextProperty(relic, "DynamicDescription", "Description"),
-            stack = GetReflectedNullableIntProperty(relic, "Amount"),
+            stack = GetReflectedNullableIntProperty(relic, "Amount")
+                ?? GetReflectedNullableIntProperty(relic, "StackCount"),
+            trigger_progress = BuildRelicTriggerProgress(relic),
             is_melted = relic.IsMelted
         };
+    }
+
+    private static TriggerProgressPayload BuildRelicTriggerProgress(RelicModel relic)
+    {
+        return BuildTriggerProgress(relic, "relic", relic.Id.Entry, relic.ShowCounter, relic.DisplayAmount);
+    }
+
+    private static TriggerProgressPayload BuildTriggerProgress(
+        object model,
+        string sourceKind,
+        string modelId,
+        bool showCounter,
+        int displayAmount)
+    {
+        var counters = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var thresholds = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var parameters = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        var statuses = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        var metricDetails = new List<TriggerMetricPayload>();
+        var seenMembers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (showCounter)
+        {
+            AddNumericMetric("display_amount", displayAmount, "counter", "DisplayAmount");
+        }
+
+        for (var type = model.GetType(); type != null && type != typeof(object); type = type.BaseType)
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+            foreach (var property in type.GetProperties(flags))
+            {
+                if (property.GetIndexParameters().Length > 0 || !ShouldReadTriggerMember(property.Name))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    AddMemberValue(property.Name, property.GetValue(model), property.Name);
+                }
+                catch
+                {
+                }
+            }
+
+            foreach (var field in type.GetFields(flags))
+            {
+                if (field.IsStatic || !ShouldReadTriggerMember(field.Name))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    AddMemberValue(field.Name, field.GetValue(model), field.Name);
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        var dynamicVars = GetReflectedProperty(model, "DynamicVars");
+        var dynamicValues = dynamicVars == null ? null : TryGetMemberValue(dynamicVars, "Values") ?? dynamicVars;
+        if (dynamicValues is IEnumerable enumerable && dynamicValues is not string)
+        {
+            foreach (var item in enumerable)
+            {
+                if (item == null)
+                {
+                    continue;
+                }
+
+                var value = TryGetMemberValue(item, "Value") ?? item;
+                var name = TryGetMemberValue(value, "Name")?.ToString()
+                    ?? TryGetMemberValue(item, "Key")?.ToString();
+                var rawAmount = TryGetMemberValue(value, "PreviewValue")
+                    ?? TryGetMemberValue(value, "BaseValue")
+                    ?? TryGetMemberValue(value, "Amount");
+                if (!string.IsNullOrWhiteSpace(name) && TryConvertDecimal(rawAmount, out var amount))
+                {
+                    parameters[name] = amount;
+                    if (IsThresholdMember(name))
+                    {
+                        thresholds[name] = DecimalToInt(amount);
+                    }
+                }
+            }
+        }
+
+        TriggerPrimaryProgressPayload? primary = null;
+        if (showCounter)
+        {
+            primary = BuildPrimary("display_amount", displayAmount);
+        }
+        else if (counters.Count > 0)
+        {
+            var first = counters.First();
+            primary = BuildPrimary(first.Key, first.Value);
+        }
+        else if (sourceKind == "power")
+        {
+            var amount = GetReflectedNullableIntProperty(model, "Amount");
+            if (amount.HasValue)
+            {
+                AddNumericMetric("amount", amount.Value, "stack_or_duration", "Amount");
+                primary = BuildPrimary("amount", amount.Value);
+            }
+        }
+
+        return new TriggerProgressPayload
+        {
+            schema_version = 1,
+            source_kind = sourceKind,
+            model_id = modelId,
+            progress_known = primary != null || counters.Count > 0 || statuses.Count > 0,
+            primary = primary,
+            counters = counters,
+            thresholds = thresholds,
+            parameters = parameters,
+            statuses = statuses,
+            metrics = metricDetails.ToArray(),
+            note = primary != null || counters.Count > 0 || statuses.Count > 0
+                ? "Runtime values exposed by the model; DisplayAmount is the authoritative UI counter when ShowCounter is true."
+                : "The model exposes no runtime counter/status. No progress was inferred from localized description text."
+        };
+
+        void AddMemberValue(string rawName, object? rawValue, string sourceMember)
+        {
+            var name = NormalizeTriggerMemberName(rawName);
+            if (!seenMembers.Add(name) || name is "display_amount" or "stack_count" or "amount")
+            {
+                return;
+            }
+
+            if (rawValue is bool status)
+            {
+                statuses[name] = status;
+                metricDetails.Add(new TriggerMetricPayload
+                {
+                    name = name,
+                    role = "status",
+                    value = status,
+                    source_member = sourceMember
+                });
+                return;
+            }
+
+            if (!TryConvertDecimal(rawValue, out var numeric))
+            {
+                return;
+            }
+
+            AddNumericMetric(name, DecimalToInt(numeric), IsThresholdMember(rawName) ? "threshold" : "counter", sourceMember);
+        }
+
+        void AddNumericMetric(string name, int value, string role, string sourceMember)
+        {
+            if (role == "threshold")
+            {
+                thresholds[name] = value;
+            }
+            else
+            {
+                counters[name] = value;
+            }
+
+            metricDetails.Add(new TriggerMetricPayload
+            {
+                name = name,
+                role = role,
+                value = value,
+                source_member = sourceMember
+            });
+        }
+
+        TriggerPrimaryProgressPayload BuildPrimary(string name, int current)
+        {
+            int? target = thresholds.Count == 1 ? thresholds.Values.Single() : null;
+            return new TriggerPrimaryProgressPayload
+            {
+                metric = name,
+                current = current,
+                threshold = target,
+                remaining = target.HasValue ? Math.Max(0, target.Value - current) : null,
+                next_trigger = target.HasValue ? current >= target.Value : null
+            };
+        }
+    }
+
+    private static bool ShouldReadTriggerMember(string name)
+    {
+        return ContainsAnyTriggerToken(name,
+            "Count", "Counter", "Progress", "Threshold", "Trigger", "Charge", "Exhaust",
+            "Activation", "Kindle", "Decipher", "Linger", "Played", "Required", "Target", "Limit");
+    }
+
+    private static bool IsThresholdMember(string name)
+    {
+        return ContainsAnyTriggerToken(name, "Threshold", "Required", "Target", "Limit", "Every");
+    }
+
+    private static bool ContainsAnyTriggerToken(string value, params string[] tokens)
+    {
+        return tokens.Any(token => value.Contains(token, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string NormalizeTriggerMemberName(string name)
+    {
+        var trimmed = name.TrimStart('_');
+        if (trimmed.StartsWith('<') && trimmed.Contains('>'))
+        {
+            trimmed = trimmed[1..trimmed.IndexOf('>')];
+        }
+
+        return string.Concat(trimmed.Select((character, index) =>
+            char.IsUpper(character) && index > 0 ? $"_{char.ToLowerInvariant(character)}" : char.ToLowerInvariant(character).ToString()));
+    }
+
+    private static bool TryConvertDecimal(object? value, out decimal result)
+    {
+        try
+        {
+            if (value != null)
+            {
+                result = Convert.ToDecimal(value);
+                return true;
+            }
+        }
+        catch
+        {
+        }
+
+        result = 0;
+        return false;
+    }
+
+    private static int DecimalToInt(decimal value)
+    {
+        return decimal.ToInt32(decimal.Truncate(value));
+    }
+
+    private static CardModifierPayload[] BuildCardModifierPayloads(CardModel card)
+    {
+        var result = new List<CardModifierPayload>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var memberName in new[] { "Enchantment", "Enchantments", "Enchants", "Modifiers", "Affixes", "Augments" })
+        {
+            var memberValue = TryGetMemberValue(card, memberName);
+            var candidates = memberValue is IEnumerable enumerable && memberValue is not string
+                ? enumerable.Cast<object?>().Where(item => item != null).Select(item => item!).ToArray()
+                : memberValue == null ? Array.Empty<object>() : new[] { memberValue };
+
+            foreach (var candidate in candidates)
+            {
+                var idValue = TryGetMemberValue(candidate, "Id");
+                var id = (idValue == null ? null : TryGetMemberValue(idValue, "Entry")?.ToString())
+                    ?? idValue?.ToString()
+                    ?? candidate.GetType().Name;
+                var name = TryCoerceText(TryGetMemberValue(candidate, "Title"));
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    name = TryCoerceText(TryGetMemberValue(candidate, "Name"));
+                }
+
+                var description = TryCoerceText(TryGetMemberValue(candidate, "DynamicDescription"));
+                if (string.IsNullOrWhiteSpace(description))
+                {
+                    description = TryCoerceText(TryGetMemberValue(candidate, "Description"));
+                }
+
+                var key = $"{memberName}:{id}:{name}";
+                if (!seen.Add(key))
+                {
+                    continue;
+                }
+
+                result.Add(new CardModifierPayload
+                {
+                    source = memberName,
+                    modifier_id = id,
+                    name = string.IsNullOrWhiteSpace(name) ? id : NormalizeCardRulesText(name),
+                    description = string.IsNullOrWhiteSpace(description) ? null : NormalizeCardRulesText(description),
+                    amount = GetReflectedNullableIntProperty(candidate, "Amount")
+                });
+            }
+        }
+
+        return result.ToArray();
     }
 
     private static RunPotionPayload BuildRunPotionPayload(
@@ -4742,14 +5188,19 @@ internal static class GameStateService
             rules_text = rulesText,
             keywords = keywords,
             mods = mods,
+            modifier_details = BuildCardModifierPayloads(card),
             can_remove = CanRemoveCard(card, mods, keywords)
         };
     }
 
     private static SelectionCardPayload BuildSelectionCardPayload(CardModel card, int index)
     {
-        var rulesText = GetCardRulesText(card);
+        var rawRulesText = GetCardRulesText(card);
+        var dynamicVars = BuildCardDynamicVarPayloads(card);
+        var resolvedRulesText = GetResolvedCardRulesText(card);
+        var rulesText = string.IsNullOrWhiteSpace(resolvedRulesText) ? rawRulesText : resolvedRulesText;
         var mods = GetCardModifierTags(card);
+        var powersApplied = BuildSelectionPowerApplications(dynamicVars);
 
         return new SelectionCardPayload
         {
@@ -4765,9 +5216,94 @@ internal static class GameStateService
             energy_cost = card.EnergyCost.GetWithModifiers(CostModifiers.All),
             star_cost = Math.Max(0, card.GetStarCostWithModifiers()),
             rules_text = rulesText,
+            raw_rules_text = rawRulesText,
+            resolved_rules_text = resolvedRulesText,
+            dynamic_vars = dynamicVars,
+            powers_applied = powersApplied,
             keywords = GetGlossaryMatches(rulesText, mods),
             mods = mods,
+            modifier_details = BuildCardModifierPayloads(card),
+            consequence_preview = BuildKnownSelectionConsequencePreview(card.Id.Entry, powersApplied),
             selectable = true
+        };
+    }
+
+    private static SelectionPowerApplicationPayload[] BuildSelectionPowerApplications(
+        IReadOnlyDictionary<string, CombatCardDynamicVarPayload> dynamicVars)
+    {
+        return dynamicVars
+            .Where(pair => pair.Key.EndsWith("Power", StringComparison.OrdinalIgnoreCase))
+            .Select(pair =>
+            {
+                var powerName = pair.Key[..^"Power".Length];
+                return new SelectionPowerApplicationPayload
+                {
+                    dynamic_var = pair.Key,
+                    power = powerName,
+                    power_id = NormalizeDynamicPowerId(powerName),
+                    amount = pair.Value.preview_value
+                };
+            })
+            .Where(item => item.amount != 0)
+            .ToArray();
+    }
+
+    private static string NormalizeDynamicPowerId(string powerName)
+    {
+        var snakeCase = Regex.Replace(powerName, "([a-z0-9])([A-Z])", "$1_$2");
+        return $"{snakeCase.ToUpperInvariant()}_POWER";
+    }
+
+    private static object? BuildKnownSelectionConsequencePreview(
+        string cardId,
+        IReadOnlyList<SelectionPowerApplicationPayload> powersApplied)
+    {
+        var normalizedCardId = cardId.Trim().ToUpperInvariant();
+        var expectedPowerId = normalizedCardId switch
+        {
+            "DISINTEGRATION" => "DISINTEGRATION_POWER",
+            "MIND_ROT" => "MIND_ROT_POWER",
+            "SLOTH" => "SLOTH_POWER",
+            "WASTE_AWAY" => "WASTE_AWAY_POWER",
+            _ => null
+        };
+        if (expectedPowerId == null)
+        {
+            return null;
+        }
+
+        var application = powersApplied.FirstOrDefault(item =>
+            string.Equals(item.power_id, expectedPowerId, StringComparison.OrdinalIgnoreCase));
+        var amount = application?.amount;
+        return new
+        {
+            effect_scope = "recognized_runtime_selection_consequence",
+            preview_complete = amount.HasValue,
+            power_id = expectedPowerId,
+            amount,
+            constraints_after_selection = normalizedCardId switch
+            {
+                "DISINTEGRATION" => new object[]
+                {
+                    new { kind = "end_turn_self_damage", amount, timing = "player_end_turn" }
+                },
+                "MIND_ROT" => new object[]
+                {
+                    new { kind = "draw_per_turn_delta", amount = amount.HasValue ? -amount.Value : (decimal?)null }
+                },
+                "SLOTH" => new object[]
+                {
+                    new { kind = "max_cards_per_turn", amount }
+                },
+                "WASTE_AWAY" => new object[]
+                {
+                    new { kind = "energy_per_turn_delta", amount = amount.HasValue ? -amount.Value : (decimal?)null }
+                },
+                _ => Array.Empty<object>()
+            },
+            limitations = amount.HasValue
+                ? Array.Empty<string>()
+                : new[] { "The live runtime amount was not available; do not substitute a static model value." }
         };
     }
 
@@ -5304,6 +5840,31 @@ internal static class GameStateService
         return nextAscension >= 0 && nextAscension <= lobby.MaxAscension;
     }
 
+    private static int? ResolveRunAscension(RunState runState)
+    {
+        var targets = new object?[]
+        {
+            runState,
+            GetReflectedProperty(runState, "RunConfig"),
+            GetReflectedProperty(runState, "Config"),
+            RunManager.Instance.RunLobby
+        };
+
+        foreach (var target in targets.Where(target => target != null))
+        {
+            foreach (var propertyName in new[] { "Ascension", "AscensionLevel", "ascension" })
+            {
+                var value = GetReflectedNullableIntProperty(target!, propertyName);
+                if (value.HasValue)
+                {
+                    return value.Value;
+                }
+            }
+        }
+
+        return null;
+    }
+
     private static IReadOnlyCollection<ulong> GetConnectedPlayerIds(RunState? runState)
     {
         if (runState == null)
@@ -5421,7 +5982,65 @@ internal sealed class CombatPayload
 
     public bool end_turn_will_kill_player { get; init; }
 
+    public EndTurnDamageSimulationPayload end_turn_simulation { get; init; } = new();
+
     public CombatLethalRiskPayload[] lethal_risks { get; init; } = Array.Empty<CombatLethalRiskPayload>();
+}
+
+internal sealed class EndTurnDamageSimulationPayload
+{
+    public string scope { get; init; } = "enemy_attack_intents_only";
+
+    public bool complete => false;
+
+    public bool incomplete => true;
+
+    public bool intent_damage_complete { get; init; }
+
+    public int declared_incoming_damage { get; init; }
+
+    public int starting_hp { get; init; }
+
+    public int starting_block { get; init; }
+
+    public int hp_after { get; init; }
+
+    public int block_after { get; init; }
+
+    public bool will_kill_player { get; init; }
+
+    public EndTurnHitPayload[] hit_timeline { get; init; } = Array.Empty<EndTurnHitPayload>();
+
+    public AutomaticConsumablePayload[] automatic_consumables { get; init; } = Array.Empty<AutomaticConsumablePayload>();
+
+    public string[] unmodeled_effects { get; init; } = Array.Empty<string>();
+}
+
+internal sealed class EndTurnHitPayload
+{
+    public int sequence { get; init; }
+    public int enemy_index { get; init; }
+    public string enemy_id { get; init; } = string.Empty;
+    public string? move_id { get; init; }
+    public int intent_index { get; init; }
+    public int hit_index { get; init; }
+    public int incoming_damage { get; init; }
+    public int blocked_damage { get; init; }
+    public int hp_damage { get; init; }
+    public int block_before { get; init; }
+    public int block_after { get; init; }
+    public int hp_before { get; init; }
+    public int hp_after { get; init; }
+    public string? automatic_consumable_id { get; init; }
+    public int? revive_hp { get; init; }
+}
+
+internal sealed class AutomaticConsumablePayload
+{
+    public int slot_index { get; init; }
+    public string item_id { get; init; } = string.Empty;
+    public string trigger { get; init; } = string.Empty;
+    public int restored_hp { get; init; }
 }
 
 internal sealed class CombatPilesPayload
@@ -5533,6 +6152,8 @@ internal sealed class RunPayload
     public string character_id { get; init; } = string.Empty;
 
     public string character_name { get; init; } = string.Empty;
+
+    public int? ascension { get; init; }
 
     public int floor { get; init; }
 
@@ -5738,6 +6359,8 @@ internal sealed class CharacterSelectOptionPayload
     public bool is_selected { get; init; }
 
     public bool is_random { get; init; }
+
+    public int? max_ascension { get; init; }
 }
 
 internal sealed class TimelinePayload
@@ -6146,6 +6769,8 @@ internal sealed class CombatHandCardPayload
 
     public string[] mods { get; init; } = Array.Empty<string>();
 
+    public CardModifierPayload[] modifier_details { get; init; } = Array.Empty<CardModifierPayload>();
+
     public string? affliction_id { get; init; }
 
     public string? affliction_name { get; init; }
@@ -6229,6 +6854,8 @@ internal sealed class CombatPowerPayload
     public bool is_debuff { get; init; }
 
     public string? stack_type { get; init; }
+
+    public TriggerProgressPayload trigger_progress { get; init; } = new();
 }
 
 internal sealed class RewardPayload
@@ -6349,6 +6976,8 @@ internal sealed class DeckCardPayload
 
     public string[] mods { get; init; } = Array.Empty<string>();
 
+    public CardModifierPayload[] modifier_details { get; init; } = Array.Empty<CardModifierPayload>();
+
     public bool can_remove { get; init; } = true;
 }
 
@@ -6378,11 +7007,36 @@ internal sealed class SelectionCardPayload
 
     public string rules_text { get; init; } = string.Empty;
 
+    public string raw_rules_text { get; init; } = string.Empty;
+
+    public string resolved_rules_text { get; init; } = string.Empty;
+
+    public Dictionary<string, CombatCardDynamicVarPayload> dynamic_vars { get; init; } =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    public SelectionPowerApplicationPayload[] powers_applied { get; init; } =
+        Array.Empty<SelectionPowerApplicationPayload>();
+
     public string[] keywords { get; init; } = Array.Empty<string>();
 
     public string[] mods { get; init; } = Array.Empty<string>();
 
+    public CardModifierPayload[] modifier_details { get; init; } = Array.Empty<CardModifierPayload>();
+
+    public object? consequence_preview { get; init; }
+
     public bool selectable { get; init; } = true;
+}
+
+internal sealed class SelectionPowerApplicationPayload
+{
+    public string dynamic_var { get; init; } = string.Empty;
+
+    public string power { get; init; } = string.Empty;
+
+    public string power_id { get; init; } = string.Empty;
+
+    public decimal amount { get; init; }
 }
 
 internal sealed class RunRelicPayload
@@ -6397,7 +7051,71 @@ internal sealed class RunRelicPayload
 
     public int? stack { get; init; }
 
+    public TriggerProgressPayload trigger_progress { get; init; } = new();
+
     public bool is_melted { get; init; }
+}
+
+internal sealed class CardModifierPayload
+{
+    public string source { get; init; } = string.Empty;
+
+    public string modifier_id { get; init; } = string.Empty;
+
+    public string name { get; init; } = string.Empty;
+
+    public string? description { get; init; }
+
+    public int? amount { get; init; }
+}
+
+internal sealed class TriggerProgressPayload
+{
+    public int schema_version { get; init; }
+
+    public string source_kind { get; init; } = string.Empty;
+
+    public string model_id { get; init; } = string.Empty;
+
+    public bool progress_known { get; init; }
+
+    public TriggerPrimaryProgressPayload? primary { get; init; }
+
+    public Dictionary<string, int> counters { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public Dictionary<string, int> thresholds { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public Dictionary<string, decimal> parameters { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public Dictionary<string, bool> statuses { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public TriggerMetricPayload[] metrics { get; init; } = Array.Empty<TriggerMetricPayload>();
+
+    public string note { get; init; } = string.Empty;
+}
+
+internal sealed class TriggerPrimaryProgressPayload
+{
+    public string metric { get; init; } = string.Empty;
+
+    public int current { get; init; }
+
+    public int? threshold { get; init; }
+
+    public int? remaining { get; init; }
+
+    public bool? next_trigger { get; init; }
+}
+
+internal sealed class TriggerMetricPayload
+{
+    public string name { get; init; } = string.Empty;
+
+    public string role { get; init; } = string.Empty;
+
+    public object? value { get; init; }
+
+    public string source_member { get; init; } = string.Empty;
 }
 
 internal sealed class RunPotionPayload
@@ -6496,4 +7214,6 @@ internal sealed class ActionDescriptor
     public bool requires_target { get; init; }
 
     public bool requires_index { get; init; }
+
+    public string[] required_fields { get; init; } = Array.Empty<string>();
 }

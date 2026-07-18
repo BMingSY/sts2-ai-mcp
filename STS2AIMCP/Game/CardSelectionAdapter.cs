@@ -351,7 +351,7 @@ internal static class CardSelectionAdapter
             NCombatPileCardSelectScreen => "combat_pile_card_select",
             NSimpleCardSelectScreen => "simple_card_select",
             NChooseACardSelectionScreen => "choose_card_select",
-            _ => "deck_card_select"
+            _ => "unknown_selection"
         };
     }
 

@@ -13,7 +13,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .client import Sts2ApiError, Sts2Client
-from .server import create_server
+from .server import create_server, enforce_startup_contract
 
 logger = logging.getLogger("sts2_mcp.network")
 
@@ -134,7 +134,8 @@ def create_network_app(
 
 
 async def run_network_server_async(config: NetworkServerConfig) -> None:
-    _, _, app = create_network_app(config)
+    _, client, app = create_network_app(config)
+    enforce_startup_contract(client)
     logger.info(
         "Starting STS2 network MCP server on http://%s:%d%s transport=%s auth=%s api=%s",
         config.host,

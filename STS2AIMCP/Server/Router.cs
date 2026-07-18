@@ -12,8 +12,8 @@ namespace STS2AIMCP.Server;
 internal static class Router
 {
     private const string ServiceName = "sts2-ai-mcp";
-    private const string ProtocolVersion = "2026-03-11-v1";
-    private const string ModVersion = "0.1.1";
+    private const string ProtocolVersion = DecisionWindowService.ProtocolVersion;
+    private const string ModVersion = "0.1.5";
     private const string LogPrefix = "[STS2AIMCP.Router]";
     private const int DefaultDecisionWaitTimeoutMs = 20_000;
     private const int ActionNextDecisionTimeoutMs = 20_000;
@@ -48,6 +48,8 @@ internal static class Router
                         mod_version = ModVersion,
                         protocol_version = ProtocolVersion,
                         v2_protocol_version = DecisionWindowService.ProtocolVersion,
+                        state_version = GameStateService.StateVersion,
+                        decision_version = DecisionWindowService.DecisionVersion,
                         game_version = gameVersion,
                         status = "ready",
                         compatibility = new
@@ -64,13 +66,31 @@ internal static class Router
                         capabilities = new
                         {
                             decision_v2 = true,
+                            exact_character_ascension = true,
+                            action_result_delta = true,
+                            preview_action = true,
+                            transactional_engine_dry_run = false,
+                            action_trace = true,
+                            action_trace_coverage = new[] { "queued_game_actions", "generic_hook_actions" },
+                            monster_state_machine_export = true,
+                            unified_trigger_progress = true,
+                            model_id_search = true,
+                            run_analysis = true,
+                            selection_runtime_preview = true,
+                            end_turn_hit_simulation = true,
+                            automatic_consumable_simulation = new[] { "FAIRY_IN_A_BOTTLE" },
+                            trigger_events_complete = false,
                             decision_profiles = new[] { "ai_safe", "debug", "full" },
                             endpoints = new[]
                             {
                                 "/v2/decision/current",
                                 "/v2/decision/wait",
+                                "/v2/decision/preview",
                                 "/v2/decision/act",
+                                "/v2/trace/actions",
                                 "/v2/data/lookup",
+                                "/v2/data/search",
+                                "/v2/data/ids",
                                 "/v2/data/export"
                             }
                         }
@@ -152,6 +172,26 @@ internal static class Router
             }
 
             if (request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/v2/decision/preview")
+            {
+                var previewRequest = await JsonHelper.DeserializeAsync<DecisionPreviewRequest>(request.InputStream, cancellationToken);
+                if (previewRequest == null)
+                {
+                    throw new ApiException(400, "invalid_request", "Request body is required.");
+                }
+
+                var payload = await GameThread.InvokeAsync(() => DecisionWindowService.Preview(previewRequest));
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = payload
+                });
+                statusCode = 200;
+                return;
+            }
+
+            if (request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase) &&
                 request.Url?.AbsolutePath == "/v2/decision/act")
             {
                 var actRequest = await JsonHelper.DeserializeAsync<DecisionActRequest>(request.InputStream, cancellationToken);
@@ -172,12 +212,69 @@ internal static class Router
                 return;
             }
 
+            if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/v2/trace/actions")
+            {
+                var afterSequence = long.TryParse(request.QueryString["after_sequence"], out var parsedSequence)
+                    ? Math.Max(0, parsedSequence)
+                    : 0;
+                var payload = ActionTraceService.SnapshotSince(afterSequence);
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = payload
+                });
+                statusCode = 200;
+                return;
+            }
+
             if (request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase) &&
                 request.Url?.AbsolutePath == "/v2/data/lookup")
             {
                 var lookupRequest = await JsonHelper.DeserializeAsync<GameDataLookupRequest>(request.InputStream, cancellationToken)
                     ?? new GameDataLookupRequest();
                 var payload = await GameThread.InvokeAsync(() => DecisionWindowService.LookupGameData(lookupRequest));
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = payload
+                });
+                statusCode = 200;
+                return;
+            }
+
+            if (request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/v2/data/search")
+            {
+                var searchRequest = await JsonHelper.DeserializeAsync<GameDataSearchRequest>(request.InputStream, cancellationToken)
+                    ?? new GameDataSearchRequest();
+                var payload = await GameThread.InvokeAsync(() => DecisionWindowService.SearchGameData(searchRequest));
+                await WriteJsonAsync(response, 200, new
+                {
+                    ok = true,
+                    request_id = requestId,
+                    data = payload
+                });
+                statusCode = 200;
+                return;
+            }
+
+            if (request.HttpMethod.Equals("GET", StringComparison.OrdinalIgnoreCase) &&
+                request.Url?.AbsolutePath == "/v2/data/ids")
+            {
+                var offset = int.TryParse(request.QueryString["offset"], out var parsedOffset)
+                    ? Math.Max(0, parsedOffset)
+                    : 0;
+                var limit = int.TryParse(request.QueryString["limit"], out var parsedLimit)
+                    ? Math.Clamp(parsedLimit, 1, 250)
+                    : 100;
+                var payload = await GameThread.InvokeAsync(() => DecisionWindowService.ListModelIds(
+                    request.QueryString["collection"],
+                    request.QueryString["query"],
+                    offset,
+                    limit));
                 await WriteJsonAsync(response, 200, new
                 {
                     ok = true,
@@ -322,6 +419,9 @@ internal static class Router
             stable = true,
             message = "Action completed; next decision is ready.",
             previous_decision_id = actionResponse.previous_decision_id,
+            result_delta = actionResponse.result_delta,
+            action_trace_cursor = actionResponse.action_trace_cursor,
+            action_trace = ActionTraceService.SnapshotSince(actionResponse.action_trace_cursor),
             next_decision = nextDecision
         };
     }
@@ -336,6 +436,9 @@ internal static class Router
             stable = false,
             message = "Action accepted; next decision did not become ready before timeout. Call wait_for_decision.",
             previous_decision_id = actionResponse.previous_decision_id,
+            result_delta = actionResponse.result_delta,
+            action_trace_cursor = actionResponse.action_trace_cursor,
+            action_trace = ActionTraceService.SnapshotSince(actionResponse.action_trace_cursor),
             next_decision = null
         };
     }

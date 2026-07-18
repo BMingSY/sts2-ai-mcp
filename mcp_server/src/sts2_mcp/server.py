@@ -13,7 +13,7 @@ from typing_extensions import NotRequired, TypedDict
 
 from fastmcp import FastMCP
 
-from .client import Sts2ApiError, Sts2Client
+from .client import Sts2ApiError, Sts2CapabilityError, Sts2Client, evaluate_runtime_contract
 from .game_data import GameDataSnapshot, GameDataVersionError, VersionedGameDataStore
 from .handoff import Sts2HandoffService
 from .knowledge import Sts2KnowledgeBase
@@ -103,8 +103,14 @@ _SCENE_FIELD_SETS: dict[str, dict[str, list[str]]] = {
             "min_hp",
             "max_hp",
             "moves",
+            "state_machine",
+            "numeric_parameters",
             "damage_values",
             "block_values",
+            "mechanics",
+            "planning_notes",
+            "data_completeness",
+            "data_source_notes",
         ],
         "powers": [
             "id",
@@ -203,7 +209,7 @@ _LEGACY_ACTION_TOOLS: tuple[ActionToolSpec, ...] = (
     ActionToolSpec("close_main_menu_submenu", "no_args", "Close the current main-menu submenu."),
     ActionToolSpec("choose_timeline_epoch", "option_index", "Choose a visible epoch on the timeline screen."),
     ActionToolSpec("confirm_timeline_overlay", "no_args", "Confirm the current timeline inspect or unlock overlay."),
-    ActionToolSpec("select_character", "option_index", "Pick a character on the character select screen."),
+    ActionToolSpec("select_character", "character_ascension", "Select a character and exact unlocked ascension level in one action."),
     ActionToolSpec("embark", "no_args", "Start the run from character select."),
     ActionToolSpec("unready", "no_args", "Cancel local ready status in a multiplayer character-select lobby."),
     ActionToolSpec("increase_ascension", "no_args", "Increase the lobby ascension level when the local player is allowed to change it."),
@@ -239,6 +245,20 @@ def _normalize_tool_profile(tool_profile: str | None) -> str:
 
 def _debug_tools_enabled() -> bool:
     return _env_flag("STS2_ENABLE_DEBUG_ACTIONS")
+
+
+def enforce_startup_contract(client: Sts2Client) -> dict[str, Any]:
+    try:
+        return client.require_runtime_contract()
+    except (Sts2ApiError, Sts2CapabilityError) as exc:
+        if _env_flag("STS2_MCP_ALLOW_INCOMPATIBLE"):
+            logger.warning("Starting with explicit incompatible-contract override: %s", exc)
+            return {
+                "compatible": False,
+                "override": True,
+                "error": str(exc),
+            }
+        raise RuntimeError(f"STS2 MCP startup contract check failed: {exc}") from exc
 
 
 def _get_game_data_dir() -> str:
@@ -576,6 +596,646 @@ def _strict_plan_transition_error(
     return None
 
 
+def _optional_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _plan_combat_context(decision: dict[str, Any]) -> dict[str, Any]:
+    context = decision.get("context")
+    if not isinstance(context, dict):
+        return {}
+    combat = context.get("combat")
+    return combat if isinstance(combat, dict) else {}
+
+
+def _plan_player_state(decision: dict[str, Any]) -> dict[str, Any]:
+    combat = _plan_combat_context(decision)
+    player = combat.get("player")
+    return player if isinstance(player, dict) else {}
+
+
+def _plan_summary_int(decision: dict[str, Any], key: str) -> int | None:
+    summary = decision.get("summary")
+    return _optional_int(summary.get(key)) if isinstance(summary, dict) else None
+
+
+def _plan_power_id(power: dict[str, Any]) -> str:
+    return str(power.get("power_id") or power.get("id") or power.get("name") or "").strip().upper()
+
+
+def _plan_card_play_limit(decision: dict[str, Any]) -> tuple[int | None, str | None]:
+    powers = _plan_player_state(decision).get("powers")
+    if not isinstance(powers, list):
+        return None, None
+    for power in powers:
+        if not isinstance(power, dict):
+            continue
+        power_id = _plan_power_id(power)
+        if power_id in {"SLOTH", "SLOTH_POWER"}:
+            amount = _optional_int(power.get("amount"))
+            if amount is not None and amount >= 0:
+                return amount, power_id
+    return None, None
+
+
+def _plan_hand_cards(decision: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    hand = _plan_combat_context(decision).get("hand")
+    if not isinstance(hand, list):
+        return {}
+    return {
+        str(card.get("card_ref")): card
+        for card in hand
+        if isinstance(card, dict) and isinstance(card.get("card_ref"), str) and card.get("card_ref")
+    }
+
+
+def _plan_enemy_key(enemy: dict[str, Any]) -> str:
+    enemy_ref = enemy.get("enemy_ref")
+    if isinstance(enemy_ref, str) and enemy_ref:
+        return enemy_ref
+    index = _optional_int(enemy.get("index"))
+    return f"enemy:{index}" if index is not None else str(enemy.get("enemy_id") or "unknown")
+
+
+def _plan_enemy_states(decision: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    enemies = _plan_combat_context(decision).get("enemies")
+    result: dict[str, dict[str, Any]] = {}
+    if not isinstance(enemies, list):
+        return result
+    for enemy in enemies:
+        if not isinstance(enemy, dict):
+            continue
+        powers = enemy.get("powers") if isinstance(enemy.get("powers"), list) else []
+        state = {
+            "enemy_ref": enemy.get("enemy_ref"),
+            "enemy_id": enemy.get("enemy_id"),
+            "name": enemy.get("name"),
+            "index": _optional_int(enemy.get("index")),
+            "hp": _optional_int(enemy.get("current_hp")),
+            "block": _optional_int(enemy.get("block")),
+            "alive": bool(enemy.get("is_alive", True)),
+            "vulnerable": any(
+                isinstance(power, dict) and _plan_power_id(power) in {"VULNERABLE", "VULNERABLE_POWER"}
+                for power in powers
+            ),
+        }
+        result[_plan_enemy_key(enemy)] = state
+        if state["index"] is not None:
+            result.setdefault(f"enemy:{state['index']}", state)
+    return result
+
+
+def _plan_choice_card(
+    choice: dict[str, Any],
+    hand_by_ref: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    source = choice.get("source")
+    card_ref = source.get("card_ref") if isinstance(source, dict) else None
+    return hand_by_ref.get(str(card_ref), {})
+
+
+def _plan_dynamic_var_int(card: dict[str, Any], *names: str) -> int | None:
+    dynamic_vars = card.get("dynamic_vars")
+    if not isinstance(dynamic_vars, dict):
+        return None
+    requested = {name.casefold() for name in names}
+    for name, payload in dynamic_vars.items():
+        if str(name).casefold() not in requested:
+            continue
+        if isinstance(payload, dict):
+            for key in ("preview_value", "enchanted_value", "base_value"):
+                value = _optional_int(payload.get(key))
+                if value is not None:
+                    return value
+        value = _optional_int(payload)
+        if value is not None:
+            return value
+    return None
+
+
+def _plan_immediate_resource_effects(card: dict[str, Any]) -> dict[str, Any]:
+    text = " ".join(
+        str(card.get(key) or "")
+        for key in ("rules_text", "raw_rules_text", "resolved_rules_text")
+    ).lower()
+    card_id = str(card.get("card_id") or "").strip().upper()
+    barriers: list[str] = []
+    next_turn = any(term in text for term in ("next turn", "下个回合", "下一回合"))
+    conditional = any(
+        term in text
+        for term in (
+            " if ",
+            "whenever",
+            "for each",
+            "per ",
+            "如果",
+            "若",
+            "每当",
+            "每有",
+        )
+    )
+    gains_energy = any(term in text for term in ("gain", "获得")) and any(
+        term in text for term in ("energy", "energyicons", "能量")
+    )
+    gains_stars = any(term in text for term in ("gain", "获得")) and any(
+        term in text for term in ("star", "staricons", "星能")
+    )
+    loses_hp = any(term in text for term in ("lose", "失去")) and any(
+        term in text for term in ("hp", "health", "生命")
+    )
+
+    energy_gain = None if next_turn or conditional else _plan_dynamic_var_int(card, "Energy")
+    star_gain = None if next_turn or conditional else _plan_dynamic_var_int(card, "Stars")
+    hp_loss = None if next_turn or conditional else _plan_dynamic_var_int(card, "HpLoss")
+    energy_multiplier = 2 if card_id == "DOUBLE_ENERGY" else None
+
+    if gains_energy and not next_turn and energy_gain is None and energy_multiplier is None:
+        barriers.append("immediate_energy_change_not_folded")
+    if gains_stars and not next_turn and star_gain is None:
+        barriers.append("immediate_star_change_not_folded")
+    if loses_hp and not next_turn and hp_loss is None:
+        barriers.append("immediate_hp_loss_not_folded")
+
+    return {
+        "energy_gain": max(0, energy_gain) if gains_energy and energy_gain is not None else None,
+        "energy_multiplier": energy_multiplier,
+        "star_gain": max(0, star_gain) if gains_stars and star_gain is not None else None,
+        "hp_loss": max(0, hp_loss) if loses_hp and hp_loss is not None else None,
+        "barriers": barriers,
+    }
+
+
+def _plan_information_barriers(card: dict[str, Any], preview: dict[str, Any]) -> list[str]:
+    text = " ".join(
+        str(card.get(key) or "")
+        for key in ("rules_text", "raw_rules_text", "resolved_rules_text")
+    ).lower()
+    barriers: list[str] = []
+    if not preview:
+        barriers.append("single_action_preview_unavailable")
+    patterns = (
+        ("draw_or_draw_pile_change", ("draw ", "draw pile", "抽", "抽牌堆")),
+        ("generated_or_added_cards", ("add ", "create ", "generate ", "加入你的手牌", "生成")),
+        ("returned_or_moved_cards", ("return ", "put ", "放回", "置于", "顶部")),
+        ("upgraded_or_transformed_cards", ("upgrade ", "transform ", "升级", "转化")),
+        ("discarded_cards", ("discard ", "弃")),
+        ("random_effect", ("random", "随机")),
+        (
+            "following_card_cost_change",
+            ("costs 0", "cost 0", "cost less", "cost more", "耗能变为0", "耗能减少", "耗能增加"),
+        ),
+    )
+    for reason, terms in patterns:
+        if any(term in text for term in terms):
+            barriers.append(reason)
+
+    unmodeled = preview.get("unmodeled_effects")
+    if isinstance(unmodeled, list) and unmodeled:
+        barriers.append("single_action_unmodeled_effects")
+    if preview and preview.get("preview_complete") is False:
+        barriers.append("single_action_preview_incomplete")
+    return list(dict.fromkeys(barriers))
+
+
+def _plan_target_state(
+    target: dict[str, Any],
+    choice: dict[str, Any],
+    enemies: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    source = choice.get("source")
+    candidate_keys: list[str] = []
+    if isinstance(source, dict):
+        for key in ("target_entity_ref", "target_ref"):
+            value = source.get(key)
+            if isinstance(value, str) and value:
+                candidate_keys.append(value)
+    target_index = _optional_int(target.get("target_index"))
+    if target_index is not None:
+        candidate_keys.append(f"enemy:{target_index}")
+    for key in candidate_keys:
+        if key in enemies:
+            return enemies[key]
+    return None
+
+
+def _preview_combat_action_plan(
+    decision: dict[str, Any],
+    steps: list[dict[str, Any]],
+    mode: str,
+) -> dict[str, Any]:
+    requested_count = len(steps)
+    base = {
+        "decision_id": decision.get("decision_id"),
+        "mutation_performed": False,
+        "requested_count": requested_count,
+        "mode": mode,
+    }
+    if (mode or "strict").strip().lower() != "strict":
+        return {**base, "status": "rejected", "stop_reason": "only_strict_mode_is_supported"}
+    if not steps:
+        return {**base, "status": "rejected", "stop_reason": "plan_requires_at_least_one_step"}
+    if not all(isinstance(step, dict) for step in steps):
+        return {**base, "status": "rejected", "stop_reason": "each_plan_step_must_be_an_object"}
+    if len(steps) > _MAX_COMBAT_PLAN_STEPS:
+        return {
+            **base,
+            "status": "rejected",
+            "stop_reason": "plan_too_long",
+            "max_steps": _MAX_COMBAT_PLAN_STEPS,
+        }
+    requested_kinds = {str(step.get("kind") or "").strip() for step in steps}
+    if not requested_kinds or "" in requested_kinds:
+        return {**base, "status": "rejected", "stop_reason": "each_plan_step_requires_kind"}
+    unsupported = requested_kinds - _PLAN_COMBAT_KINDS
+    if unsupported:
+        return {
+            **base,
+            "status": "rejected",
+            "stop_reason": "preview_action_plan_supports_combat_actions_only",
+            "unsupported_kinds": sorted(unsupported),
+        }
+
+    combat = _plan_combat_context(decision)
+    player = _plan_player_state(decision)
+    hand_by_ref = _plan_hand_cards(decision)
+    enemies = _plan_enemy_states(decision)
+    energy = _optional_int(player.get("energy"))
+    if energy is None:
+        energy = _plan_summary_int(decision, "energy")
+    stars = _optional_int(player.get("stars"))
+    if stars is None:
+        stars = _plan_summary_int(decision, "stars")
+    cards_played = _optional_int(combat.get("cards_played_this_turn"))
+    if cards_played is None:
+        cards_played = _plan_summary_int(decision, "cards_played_this_turn")
+    block = _optional_int(player.get("block"))
+    if block is None:
+        block = _plan_summary_int(decision, "block")
+    hp = _optional_int(player.get("current_hp"))
+    if hp is None:
+        hp = _plan_summary_int(decision, "current_hp")
+    max_cards, max_cards_source = _plan_card_play_limit(decision)
+
+    initial = {
+        "energy": energy,
+        "stars": stars,
+        "cards_played_this_turn": cards_played,
+        "max_cards_per_turn": max_cards,
+        "max_cards_source": max_cards_source,
+        "player_block": block,
+        "player_hp": hp,
+    }
+    projected_steps: list[dict[str, Any]] = []
+    limitations: list[str] = []
+    consumed_card_refs: set[str] = set()
+    shared_limit_counts: dict[str, int] = {}
+    aggregate_block_gain = 0
+    aggregate_damage: dict[str, int] = {}
+    validation_complete = True
+    effects_complete = True
+    all_steps_preflight_passed = True
+    known_infeasible = False
+    stop_reason: str | None = None
+    stopped_before_step: int | None = None
+    stopped_after_step: int | None = None
+
+    for index, step in enumerate(steps):
+        choice, match_error, match_count = _match_plan_choice(decision, step)
+        if choice is None:
+            all_steps_preflight_passed = False
+            known_infeasible = True
+            stop_reason = match_error
+            stopped_before_step = index
+            limitations.append(f"step {index}: match_count={match_count}")
+            break
+
+        kind = str(choice.get("kind") or "")
+        source = choice.get("source") if isinstance(choice.get("source"), dict) else {}
+        card_ref = str(source.get("card_ref") or "")
+        card = _plan_choice_card(choice, hand_by_ref)
+        preview = choice.get("preview") if isinstance(choice.get("preview"), dict) else {}
+        energy_before = energy
+        stars_before = stars
+        cards_before = cards_played
+        block_before = block
+        step_limitations: list[str] = []
+        step_damage: dict[str, int] = {}
+        step_block_gain = 0
+        step_energy_gain = 0
+        step_star_gain = 0
+        step_hp_loss = 0
+        newly_projected_kill = False
+
+        if kind == "play_card":
+            if card_ref and card_ref in consumed_card_refs:
+                all_steps_preflight_passed = False
+                known_infeasible = True
+                stop_reason = "card_ref_reused_in_plan"
+                stopped_before_step = index
+                break
+
+            costs_x = bool(card.get("costs_x"))
+            star_costs_x = bool(card.get("star_costs_x"))
+            energy_cost = _optional_int(preview.get("energy_cost"))
+            if energy_cost is None:
+                energy_cost = _optional_int(card.get("energy_cost"))
+            star_cost = _optional_int(preview.get("star_cost"))
+            if star_cost is None:
+                star_cost = _optional_int(card.get("star_cost"))
+
+            if costs_x:
+                if energy is None:
+                    validation_complete = False
+                    step_limitations.append("x_energy_cost_unknown")
+                else:
+                    energy_cost = energy
+            elif energy_cost is not None:
+                energy_cost = max(0, energy_cost)
+                if energy is None:
+                    validation_complete = False
+                    step_limitations.append("energy_budget_unknown")
+                elif energy < energy_cost:
+                    all_steps_preflight_passed = False
+                    known_infeasible = True
+                    stop_reason = "not_enough_energy"
+                    stopped_before_step = index
+                    break
+
+            if star_costs_x:
+                if stars is None:
+                    validation_complete = False
+                    step_limitations.append("x_star_cost_unknown")
+                else:
+                    star_cost = stars
+            elif star_cost is not None:
+                star_cost = max(0, star_cost)
+                if stars is None:
+                    validation_complete = False
+                    step_limitations.append("star_budget_unknown")
+                elif stars < star_cost:
+                    all_steps_preflight_passed = False
+                    known_infeasible = True
+                    stop_reason = "not_enough_stars"
+                    stopped_before_step = index
+                    break
+
+            if max_cards is not None:
+                if cards_played is None:
+                    validation_complete = False
+                    step_limitations.append("cards_played_count_unknown")
+                elif cards_played + 1 > max_cards:
+                    all_steps_preflight_passed = False
+                    known_infeasible = True
+                    stop_reason = "card_play_limit_reached"
+                    stopped_before_step = index
+                    break
+
+            shared_limit = preview.get("shared_play_limit")
+            if isinstance(shared_limit, dict):
+                group_id = str(shared_limit.get("group_id") or "")
+                group_max = _optional_int(shared_limit.get("max_plays_per_turn"))
+                if group_id and group_max is not None:
+                    used = shared_limit_counts.get(group_id, 0)
+                    if used + 1 > group_max:
+                        all_steps_preflight_passed = False
+                        known_infeasible = True
+                        stop_reason = "shared_play_limit_reached"
+                        stopped_before_step = index
+                        break
+                    shared_limit_counts[group_id] = used + 1
+
+            if energy is not None and energy_cost is not None:
+                energy -= energy_cost
+            if stars is not None and star_cost is not None:
+                stars -= star_cost
+            if cards_played is not None:
+                cards_played += 1
+            if card_ref:
+                consumed_card_refs.add(card_ref)
+
+            resource_effects = _plan_immediate_resource_effects(card)
+            energy_multiplier = _optional_int(resource_effects.get("energy_multiplier"))
+            if energy_multiplier is not None:
+                if energy is None:
+                    validation_complete = False
+                    step_limitations.append("energy_multiplier_budget_unknown")
+                else:
+                    energy_before_effect = energy
+                    energy *= max(0, energy_multiplier)
+                    step_energy_gain += energy - energy_before_effect
+            energy_gain = _optional_int(resource_effects.get("energy_gain"))
+            if energy_gain is not None:
+                if energy is None:
+                    validation_complete = False
+                    step_limitations.append("energy_gain_budget_unknown")
+                else:
+                    energy += energy_gain
+                    step_energy_gain += energy_gain
+            star_gain = _optional_int(resource_effects.get("star_gain"))
+            if star_gain is not None:
+                if stars is None:
+                    validation_complete = False
+                    step_limitations.append("star_gain_budget_unknown")
+                else:
+                    stars += star_gain
+                    step_star_gain += star_gain
+            hp_loss = _optional_int(resource_effects.get("hp_loss"))
+            if hp_loss is not None:
+                step_hp_loss = hp_loss
+                if hp is None:
+                    effects_complete = False
+                    step_limitations.append("player_hp_unknown_for_hp_loss")
+                else:
+                    hp = max(0, hp - hp_loss)
+
+            block_preview = preview.get("block")
+            block_gain = None
+            if isinstance(block_preview, dict):
+                block_gain = _optional_int(block_preview.get("estimated_gain"))
+            if block_gain is not None:
+                step_block_gain = block_gain
+                aggregate_block_gain += block_gain
+                if block is not None:
+                    block += block_gain
+
+            damage_preview = preview.get("damage")
+            if isinstance(damage_preview, dict) and isinstance(damage_preview.get("targets"), list):
+                for target in damage_preview["targets"]:
+                    if not isinstance(target, dict):
+                        continue
+                    enemy = _plan_target_state(target, choice, enemies)
+                    if enemy is None:
+                        effects_complete = False
+                        step_limitations.append("damage_target_state_unavailable")
+                        continue
+                    if enemy.get("alive") is False:
+                        all_steps_preflight_passed = False
+                        known_infeasible = True
+                        stop_reason = "projected_target_not_alive"
+                        stopped_before_step = index
+                        break
+                    per_hit = _optional_int(target.get("pre_target_per_hit"))
+                    if per_hit is None:
+                        per_hit = _optional_int(target.get("final_per_hit"))
+                    card_id = str(card.get("card_id") or preview.get("card_id") or "").strip().upper()
+                    if card_id == "BODY_SLAM":
+                        if block_before is None:
+                            effects_complete = False
+                            step_limitations.append("body_slam_projected_block_unknown")
+                            continue
+                        per_hit = max(0, block_before)
+                    hit_count = _optional_int(target.get("hit_count")) or 1
+                    if per_hit is None:
+                        effects_complete = False
+                        step_limitations.append("damage_amount_unavailable")
+                        continue
+                    if enemy.get("vulnerable") and target.get("pre_target_per_hit") is not None:
+                        per_hit = int(per_hit * 1.5)
+                    total_damage = max(0, per_hit) * max(1, hit_count)
+                    enemy_block = enemy.get("block")
+                    enemy_hp = enemy.get("hp")
+                    if isinstance(enemy_block, int):
+                        block_damage = min(enemy_block, total_damage)
+                        enemy["block"] = enemy_block - block_damage
+                    else:
+                        effects_complete = False
+                        step_limitations.append("target_block_unknown")
+                        continue
+                    hp_damage = total_damage - block_damage
+                    if isinstance(enemy_hp, int):
+                        enemy["hp"] = max(0, enemy_hp - hp_damage)
+                        enemy["alive"] = enemy["hp"] > 0
+                        newly_projected_kill = newly_projected_kill or (enemy_hp > 0 and enemy["hp"] == 0)
+                    else:
+                        effects_complete = False
+                    enemy_key = str(enemy.get("enemy_ref") or f"enemy:{enemy.get('index')}")
+                    aggregate_damage[enemy_key] = aggregate_damage.get(enemy_key, 0) + hp_damage
+                    step_damage[enemy_key] = step_damage.get(enemy_key, 0) + hp_damage
+                if known_infeasible:
+                    break
+
+            powers_applied = preview.get("powers_applied")
+            unsupported_power_change = False
+            if isinstance(powers_applied, list):
+                for power in powers_applied:
+                    if not isinstance(power, dict):
+                        continue
+                    power_name = str(power.get("power") or power.get("power_id") or "").upper()
+                    if "VULNERABLE" in power_name:
+                        target_state = _plan_target_state({}, choice, enemies)
+                        if target_state is not None:
+                            target_state["vulnerable"] = True
+                    elif power_name:
+                        unsupported_power_change = True
+
+            barriers = _plan_information_barriers(card, preview)
+            barriers.extend(
+                reason
+                for reason in resource_effects.get("barriers", [])
+                if isinstance(reason, str)
+            )
+            if not preview:
+                effects_complete = False
+            if unsupported_power_change:
+                barriers.append("unsupported_power_changes_following_preview")
+            if (costs_x or star_costs_x) and index < requested_count - 1:
+                barriers.append("x_cost_changes_following_budget")
+            if newly_projected_kill and index < requested_count - 1:
+                barriers.append("projected_kill_may_change_decision")
+            if hp == 0 and step_hp_loss > 0:
+                barriers.append("projected_player_death_may_change_decision")
+
+            if barriers:
+                effects_complete = False
+                step_limitations.extend(barriers)
+                if index < requested_count - 1:
+                    validation_complete = False
+                    all_steps_preflight_passed = False
+                    stop_reason = "information_boundary_after_step"
+                    stopped_after_step = index
+
+        elif kind == "use_potion":
+            effects_complete = False
+            step_limitations.append("potion_effects_not_folded_by_plan_preview")
+            if index < requested_count - 1:
+                validation_complete = False
+                all_steps_preflight_passed = False
+                stop_reason = "information_boundary_after_step"
+                stopped_after_step = index
+
+        projected_steps.append(
+            {
+                "step": index,
+                "action_id": choice.get("action_id"),
+                "kind": kind,
+                "card_ref": card_ref or None,
+                "energy_before": energy_before,
+                "energy_after": energy,
+                "stars_before": stars_before,
+                "stars_after": stars,
+                "cards_played_before": cards_before,
+                "cards_played_after": cards_played,
+                "block_before": block_before,
+                "block_after": block,
+                "block_gain": step_block_gain,
+                "energy_gain": step_energy_gain,
+                "star_gain": step_star_gain,
+                "hp_loss": step_hp_loss,
+                "hp_damage_by_target": step_damage,
+                "limitations": list(dict.fromkeys(step_limitations)),
+            }
+        )
+        limitations.extend(f"step {index}: {reason}" for reason in step_limitations)
+        if stopped_after_step is not None:
+            break
+
+    valid_prefix_count = len(projected_steps)
+    projected_enemy_values = {
+        id(value): value for value in enemies.values()
+    }.values()
+    return {
+        **base,
+        "status": "previewed",
+        "validation_complete": validation_complete,
+        "effects_complete": effects_complete,
+        "all_steps_preflight_passed": all_steps_preflight_passed,
+        "executable_all": all_steps_preflight_passed and validation_complete,
+        "safe_to_execute_strict": all_steps_preflight_passed and validation_complete,
+        "known_infeasible": known_infeasible,
+        "valid_prefix_count": valid_prefix_count,
+        "stop_reason": stop_reason,
+        "stopped_before_step": stopped_before_step,
+        "stopped_after_step": stopped_after_step,
+        "initial": initial,
+        "projected": {
+            "energy": energy,
+            "stars": stars,
+            "cards_played_this_turn": cards_played,
+            "player_block": block,
+            "player_hp": hp,
+            "enemies": list(projected_enemy_values),
+        },
+        "aggregate": {
+            "block_gain": aggregate_block_gain,
+            "hp_damage_by_target": aggregate_damage,
+        },
+        "steps": projected_steps,
+        "limitations": list(dict.fromkeys(limitations)),
+        "coverage": {
+            "stable_choice_matching": True,
+            "energy_and_star_budget": True,
+            "known_card_play_limits": True,
+            "sequential_direct_damage_and_block": True,
+            "transactional_engine_dry_run": False,
+        },
+    }
+
+
 def _append_decision_log(
     *,
     decision: dict[str, Any] | None,
@@ -669,6 +1329,15 @@ def _register_option_target_tool(mcp: FastMCP, name: str, description: str, hand
     mcp.tool(name=name, description=description)(tool)
 
 
+def _register_character_ascension_tool(mcp: FastMCP, name: str, description: str, handler: ToolHandler) -> None:
+    def tool(character_id: str, ascension: int) -> dict[str, Any]:
+        return handler(character_id=character_id, ascension=ascension)
+
+    tool.__name__ = name
+    tool.__doc__ = description
+    mcp.tool(name=name, description=description)(tool)
+
+
 def _register_legacy_action_tools(mcp: FastMCP, sts2: Sts2Client) -> None:
     for spec in _LEGACY_ACTION_TOOLS:
         handler = getattr(sts2, spec.name)
@@ -688,7 +1357,51 @@ def _register_legacy_action_tools(mcp: FastMCP, sts2: Sts2Client) -> None:
             _register_option_target_tool(mcp, spec.name, spec.description, handler)
             continue
 
+        if spec.kind == "character_ascension":
+            _register_character_ascension_tool(mcp, spec.name, spec.description, handler)
+            continue
+
         raise RuntimeError(f"Unsupported action tool kind: {spec.kind}")
+
+
+def _register_debug_tools(mcp: FastMCP, sts2: Sts2Client) -> None:
+    @mcp.tool
+    def run_console_command(command: str) -> dict[str, Any]:
+        """Run a game dev-console command for local validation or debugging."""
+        return sts2.run_console_command(command=command)
+
+    @mcp.tool
+    def search_game_data(
+        query: str,
+        collections: str = "",
+        limit: int = 25,
+    ) -> dict[str, Any]:
+        """Search live model IDs, names, descriptions, and model types for debugging."""
+        requested_collections = [
+            value.strip()
+            for value in collections.split(",")
+            if value.strip()
+        ]
+        return sts2.search_game_data(
+            query=query,
+            collections=requested_collections or None,
+            limit=limit,
+        )
+
+    @mcp.tool
+    def list_model_ids(
+        collection: str,
+        query: str = "",
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """List live model IDs in one collection, optionally filtered by text."""
+        return sts2.list_model_ids(
+            collection=collection,
+            query=query or None,
+            offset=offset,
+            limit=limit,
+        )
 
 
 def create_server(client: Sts2Client | None = None, tool_profile: str | None = None) -> FastMCP:
@@ -786,6 +1499,7 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
                 "data_source": "mcp_versioned_cache",
                 "exported_at_utc": snapshot.manifest.get("exported_at_utc"),
                 "content_hash": snapshot.manifest.get("content_hash"),
+                "curated_overrides": snapshot.manifest.get("curated_overrides", []),
             },
             "relevant": relevant,
         }
@@ -1052,6 +1766,19 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
                 "stop_reason": "starting_decision_is_not_current",
             }
 
+        preflight = _preview_combat_action_plan(decision, steps, normalized_mode) if contains_combat else None
+        if isinstance(preflight, dict) and preflight.get("known_infeasible") is True:
+            return {
+                "status": "stopped",
+                "stable": True,
+                "executed_count": 0,
+                "requested_count": len(steps),
+                "stop_reason": preflight.get("stop_reason") or "plan_preflight_failed",
+                "stopped_before_step": preflight.get("stopped_before_step"),
+                "preflight": preflight,
+                "next_decision": decision,
+            }
+
         executed: list[dict[str, Any]] = []
         next_decision: dict[str, Any] | None = decision
         for index, step in enumerate(steps):
@@ -1242,6 +1969,7 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
         health = sts2.get_health()
         return {
             **health,
+            "runtime_contract": evaluate_runtime_contract(health),
             "mcp_tool_profile": profile,
             "mcp_capabilities": {
                 "ai_safe_v2": profile == "ai_safe_v2",
@@ -1249,9 +1977,13 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
                     "health_check",
                     "wait_for_decision",
                     "get_current_decision",
+                    "preview_action",
+                    "preview_action_plan",
                     "take_action",
+                    "get_action_trace",
                     "execute_action_plan",
                     "select_cards",
+                    "select_character",
                     "lookup_game_data",
                     "append_decision_note",
                 ] if profile == "ai_safe_v2" else None,
@@ -1292,6 +2024,40 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
                 ),
                 include_relevant=include_relevant_game_data,
             )
+
+        @mcp.tool
+        def preview_action(decision_id: str, action_id: str) -> dict[str, Any]:
+            """Preview one current decision action without mutating game state."""
+            return sts2.preview_action(decision_id=decision_id, action_id=action_id)
+
+        @mcp.tool
+        def preview_action_plan(
+            decision_id: str,
+            steps: list[ActionPlanStep],
+            mode: str = "strict",
+        ) -> dict[str, Any]:
+            """Preflight a short combat plan without mutating the game.
+
+            The preview folds known energy, star, card-play-limit, direct damage,
+            and direct Block effects through a shadow state. It stops at explicit
+            information boundaries such as draws, generated/returned cards,
+            upgrades, random effects, unsupported powers, or projected kills.
+            This is not a transactional engine dry-run.
+            """
+            decision = _resolve_plan_start(decision_id)
+            if decision is None:
+                return {
+                    "status": "stopped",
+                    "mutation_performed": False,
+                    "requested_count": len(steps),
+                    "stop_reason": "starting_decision_is_not_current",
+                }
+            return _preview_combat_action_plan(decision, steps, mode)
+
+        @mcp.tool
+        def get_action_trace(after_sequence: int = 0) -> dict[str, Any]:
+            """Return ordered engine GameAction and GenericHookGameAction events."""
+            return sts2.get_action_trace(after_sequence=after_sequence)
 
         @mcp.tool
         def take_action(
@@ -1380,6 +2146,70 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
             )
 
         @mcp.tool
+        def select_character(
+            character_id: str,
+            ascension: int,
+            client_note: str | None = None,
+        ) -> dict[str, Any]:
+            """Select one unlocked character and exact ascension level in a single action."""
+            normalized_character = character_id.strip().upper()
+            requested_ascension = int(ascension)
+            wrapper = _cache_decision(
+                sts2.get_current_decision(
+                    profile="ai_safe",
+                    include_raw_state=False,
+                    include_relevant_game_data=False,
+                ),
+                include_relevant=False,
+            )
+            decision = wrapper.get("decision") if isinstance(wrapper, dict) else None
+            if not isinstance(decision, dict) or decision.get("phase") != "character_select":
+                return {
+                    "status": "rejected",
+                    "stable": True,
+                    "stop_reason": "character_selection_not_available",
+                    "current_phase": decision.get("phase") if isinstance(decision, dict) else None,
+                }
+
+            available_pairs: list[dict[str, Any]] = []
+            matched_choice: dict[str, Any] | None = None
+            for choice in decision.get("choices", []):
+                if not isinstance(choice, dict) or choice.get("kind") != "select_character":
+                    continue
+                source = choice.get("source")
+                if not isinstance(source, dict):
+                    continue
+                choice_character = str(source.get("character_id") or "").strip().upper()
+                try:
+                    choice_ascension = int(source.get("ascension"))
+                except (TypeError, ValueError):
+                    continue
+                available_pairs.append(
+                    {"character_id": choice_character, "ascension": choice_ascension}
+                )
+                if choice_character == normalized_character and choice_ascension == requested_ascension:
+                    matched_choice = choice
+
+            if matched_choice is None:
+                return {
+                    "status": "rejected",
+                    "stable": True,
+                    "stop_reason": "character_or_ascension_not_available",
+                    "requested": {
+                        "character_id": normalized_character,
+                        "ascension": requested_ascension,
+                    },
+                    "available": available_pairs,
+                }
+
+            return _take_logged_action(
+                decision=decision,
+                decision_id=str(decision.get("decision_id") or ""),
+                action_id=str(matched_choice.get("action_id") or ""),
+                client_note=client_note,
+            )
+
+        @mcp.tool
         def lookup_game_data(items: list[dict[str, Any]], fields: list[str] | None = None) -> dict[str, Any]:
             """Lookup game metadata from the versioned local snapshot for the running game build."""
             try:
@@ -1416,6 +2246,8 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
                 note=note,
             )
 
+        if _debug_tools_enabled():
+            _register_debug_tools(mcp, sts2)
         return mcp
 
     @mcp.tool
@@ -1613,6 +2445,8 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
         card_index: int | None = None,
         target_index: int | None = None,
         option_index: int | None = None,
+        character_id: str | None = None,
+        ascension: int | None = None,
     ) -> dict[str, Any]:
         """Execute one currently available game action through the compact tool surface.
 
@@ -1635,6 +2469,7 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
             - Use `card_index` for `play_card`.
             - Use `option_index` for map, reward, shop, event, rest, selection,
               and multiplayer-lobby actions.
+            - For `select_character`, pass both `character_id` and exact `ascension`.
             - Use `target_index` only when the latest state marks a card or potion as `requires_target=true`.
             - Read `target_index_space` and `valid_target_indices` from state to know whether `target_index`
               refers to `combat.enemies[]` or `combat.players[]`.
@@ -1649,6 +2484,8 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
             card_index=card_index,
             target_index=target_index,
             option_index=option_index,
+            character_id=character_id,
+            ascension=ascension,
             client_context={
                 "source": "mcp",
                 "tool_name": "act",
@@ -1660,16 +2497,15 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
         _register_legacy_action_tools(mcp, sts2)
 
     if _debug_tools_enabled():
-        @mcp.tool
-        def run_console_command(command: str) -> dict[str, Any]:
-            """Run a game dev-console command for local validation or debugging."""
-            return sts2.run_console_command(command=command)
+        _register_debug_tools(mcp, sts2)
 
     return mcp
 
 
 def main() -> None:
-    create_server().run(transport="stdio", show_banner=False)
+    client = Sts2Client()
+    enforce_startup_contract(client)
+    create_server(client=client).run(transport="stdio", show_banner=False)
 
 
 if __name__ == "__main__":
