@@ -144,6 +144,13 @@ live resolved text/dynamic values plus recognized consequence and deck-interacti
 previews, so callers do not need to substitute a static model value for a runtime
 curse amount.
 
+The current Act's rolled boss is available throughout the run as
+`context.run.boss_encounter` with both its stable `encounter_id` and localized
+`name`. Ascension 10+ runs also expose `second_boss_encounter`. On map decisions,
+the same identities are repeated under `context.map.boss_info` alongside their map
+nodes, allowing reward, shop, and route choices to account for the known boss before
+the boss room is reached.
+
 Static card, monster, encounter, enchantment, power, relic, potion, and event metadata is cached once per game version under `mcp_server/data/versions/`. Pre-generate the running version with:
 
 ```bash

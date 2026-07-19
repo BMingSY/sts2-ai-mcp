@@ -85,8 +85,8 @@ Return the current stable decision if one exists. This endpoint does not wait.
     "available": true,
     "decision": {
       "decision_id": "WJT8A736AV:f33:combat:t6:0007",
-      "decision_version": 4,
-      "state_version": 12,
+      "decision_version": 5,
+      "state_version": 13,
       "protocol_version": "2026-07-18-v2-draft",
       "run_id": "WJT8A736AV",
       "created_at_utc": "2026-07-04T12:00:00.0000000Z",
@@ -319,6 +319,13 @@ hypergeometric natural-access probabilities through turn 4. Its assumptions and
 limitations travel with the payload; it does not rank cards or promise boss
 readiness.
 
+Every live `context.run` also includes the current Act's rolled
+`boss_encounter`. The object contains a stable `encounter_id` and localized `name`.
+On Ascension 10+ double-boss Acts, `second_boss_encounter` contains the second
+rolled boss; otherwise it is `null`. These fields are run-level context so they
+remain available during combats, rewards, events, shops, rest sites, and chests—not
+only while the map screen is open.
+
 Choices:
 
 - one `play_card` per legal playable card-target pair
@@ -343,7 +350,12 @@ Do not emit `resolve_rewards` or `collect_rewards_and_proceed` in `ai_safe`.
 
 ### Map
 
-`context.map` should include current node, available nodes, visible child path summaries, and boss info.
+`context.map` should include current node, available nodes, visible child path summaries, and boss info. `boss_info.boss_encounter` and
+`boss_info.second_boss_encounter` repeat the structured run-level identities next
+to `boss_node` and `second_boss_node`. The backward-compatible
+`known_boss_encounter_id`, `known_boss_name`,
+`known_second_boss_encounter_id`, and `known_second_boss_name` fields are populated
+from those objects rather than being placeholders.
 
 Choices:
 

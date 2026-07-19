@@ -56,7 +56,7 @@ namespace STS2AIMCP.Game;
 
 internal static class GameStateService
 {
-    internal const int StateVersion = 12;
+    internal const int StateVersion = 13;
     private const int AgentViewVersion = 1;
     private const int MaxCombatPileStacks = 120;
 
@@ -2323,6 +2323,8 @@ internal static class GameStateService
             gold = player.Gold,
             max_energy = player.MaxEnergy,
             base_orb_slots = player.BaseOrbSlotCount,
+            boss_encounter = BuildBossEncounterPayload(runState.Act.BossEncounter),
+            second_boss_encounter = BuildBossEncounterPayload(runState.Act.SecondBossEncounter),
             deck = player.Deck.Cards.Select((card, index) => BuildDeckCardPayload(card, index)).ToArray(),
             relics = player.Relics.Select((relic, index) => BuildRunRelicPayload(relic, index)).ToArray(),
             players = runState.Players
@@ -2331,6 +2333,33 @@ internal static class GameStateService
                 .ToArray(),
             potions = player.PotionSlots.Select((potion, index) =>
                 BuildRunPotionPayload(currentScreen, combatState, player, potion, index)).ToArray()
+        };
+    }
+
+    private static BossEncounterPayload? BuildBossEncounterPayload(EncounterModel? encounter)
+    {
+        if (encounter == null)
+        {
+            return null;
+        }
+
+        var encounterId = SafeReadString(() => encounter.Id.Entry, encounter.GetType().Name);
+        var encounterName = string.Empty;
+        foreach (var memberName in new[] { "Title", "Name", "DisplayName" })
+        {
+            encounterName = TryCoerceText(TryGetMemberValue(encounter, memberName));
+            if (!string.IsNullOrWhiteSpace(encounterName))
+            {
+                break;
+            }
+        }
+
+        return new BossEncounterPayload
+        {
+            encounter_id = encounterId,
+            name = string.IsNullOrWhiteSpace(encounterName)
+                ? encounterId
+                : NormalizeCardRulesText(encounterName)
         };
     }
 
@@ -2465,6 +2494,8 @@ internal static class GameStateService
             gold = run.gold,
             max_energy = run.max_energy,
             base_orb_slots = run.base_orb_slots,
+            boss_encounter = run.boss_encounter,
+            second_boss_encounter = run.second_boss_encounter,
             deck = deckCards.Length > 0
                 ? BuildAgentCardStacks(deckCards, glossaryTerms)
                 : BuildAgentCardStacks(run.deck, glossaryTerms),
@@ -3495,6 +3526,8 @@ internal static class GameStateService
             starting_node = BuildMapCoordPayload(runState.Map.StartingMapPoint.coord),
             boss_node = BuildMapCoordPayload(runState.Map.BossMapPoint.coord),
             second_boss_node = BuildMapCoordPayload(runState.Map.SecondBossMapPoint?.coord),
+            boss_encounter = BuildBossEncounterPayload(runState.Act.BossEncounter),
+            second_boss_encounter = BuildBossEncounterPayload(runState.Act.SecondBossEncounter),
             nodes = allMapPoints
                 .Select(point => BuildMapGraphNodePayload(
                     point,
@@ -6167,6 +6200,10 @@ internal sealed class RunPayload
 
     public int base_orb_slots { get; init; }
 
+    public BossEncounterPayload? boss_encounter { get; init; }
+
+    public BossEncounterPayload? second_boss_encounter { get; init; }
+
     public DeckCardPayload[] deck { get; init; } = Array.Empty<DeckCardPayload>();
 
     public RunRelicPayload[] relics { get; init; } = Array.Empty<RunRelicPayload>();
@@ -6248,9 +6285,20 @@ internal sealed class MapPayload
 
     public MapCoordPayload? second_boss_node { get; init; }
 
+    public BossEncounterPayload? boss_encounter { get; init; }
+
+    public BossEncounterPayload? second_boss_encounter { get; init; }
+
     public MapGraphNodePayload[] nodes { get; init; } = Array.Empty<MapGraphNodePayload>();
 
     public MapNodePayload[] available_nodes { get; init; } = Array.Empty<MapNodePayload>();
+}
+
+internal sealed class BossEncounterPayload
+{
+    public string encounter_id { get; init; } = string.Empty;
+
+    public string name { get; init; } = string.Empty;
 }
 
 internal sealed class SelectionPayload

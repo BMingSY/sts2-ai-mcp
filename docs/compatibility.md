@@ -9,7 +9,7 @@ Every public release should record:
 - `mod_version`
 - `v2_protocol_version`
 - `state_version` and `decision_version`
-- semantic capability flags such as `exact_character_ascension`, `preview_action`, `action_trace`, `monster_state_machine_export`, `unified_trigger_progress`, `run_analysis`, and `selection_runtime_preview`
+- semantic capability flags such as `exact_character_ascension`, `preview_action`, `action_trace`, `monster_state_machine_export`, `unified_trigger_progress`, `run_analysis`, `map_boss_identity`, and `selection_runtime_preview`
 - tested Slay the Spire 2 game version
 - tested Godot/MegaDot version
 - platform and architecture
@@ -28,13 +28,14 @@ The mod health response should expose enough data for MCP clients to decide whet
 ```json
 {
   "service": "sts2-ai-mcp",
-  "mod_version": "0.1.5",
+  "mod_version": "0.1.6",
   "v2_protocol_version": "2026-07-18-v2-draft",
-  "state_version": 12,
-  "decision_version": 4,
+  "state_version": 13,
+  "decision_version": 5,
   "game_version": "v0.107.1",
   "capabilities": {
     "run_analysis": true,
+    "map_boss_identity": true,
     "selection_runtime_preview": true
   },
   "compatibility": {
@@ -53,7 +54,7 @@ Status meanings:
 
 AI-safe clients should refuse normal `take_action` calls when status is `incompatible`, and should surface a warning when status is `untested`.
 
-The bundled MCP now performs a strict startup contract check for protocol `2026-07-18-v2-draft`, state version 12, decision version 4, and its required capability flags. It exits instead of serving an older contract silently. An explicit `STS2_MCP_ALLOW_INCOMPATIBLE=1` override is available only for local compatibility experiments.
+The bundled MCP now performs a strict startup contract check for protocol `2026-07-18-v2-draft`, state version 13, decision version 5, and its required capability flags. It exits instead of serving an older contract silently. An explicit `STS2_MCP_ALLOW_INCOMPATIBLE=1` override is available only for local compatibility experiments.
 
 ## Game Data
 

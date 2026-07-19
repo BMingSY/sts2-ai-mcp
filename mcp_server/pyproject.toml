@@ -1,6 +1,6 @@
 [project]
 name = "sts2-ai-mcp"
-version = "0.1.5"
+version = "0.1.6"
 description = "AI-safe FastMCP wrapper for the local Slay the Spire 2 mod"
 readme = "README.md"
 requires-python = ">=3.11"

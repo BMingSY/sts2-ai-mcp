@@ -41,6 +41,15 @@ class RuntimeContractTests(unittest.TestCase):
 
         self.assertIn("capability:action_trace", raised.exception.missing)
 
+    def test_boss_identity_is_a_required_runtime_capability(self) -> None:
+        health = compatible_health()
+        health["capabilities"]["map_boss_identity"] = False
+
+        result = evaluate_runtime_contract(health)
+
+        self.assertFalse(result["compatible"])
+        self.assertIn("capability:map_boss_identity", result["missing"])
+
     def test_preview_and_trace_client_routes(self) -> None:
         client = Sts2Client()
         with patch.object(client, "_request", return_value={"ok": True}) as request:

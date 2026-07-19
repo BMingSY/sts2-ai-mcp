@@ -39,8 +39,8 @@ _DEFAULT_MAX_RETRIES = 2
 _RETRY_BACKOFF_BASE = 0.5
 
 REQUIRED_PROTOCOL_VERSION = "2026-07-18-v2-draft"
-MIN_STATE_VERSION = 12
-MIN_DECISION_VERSION = 4
+MIN_STATE_VERSION = 13
+MIN_DECISION_VERSION = 5
 REQUIRED_CAPABILITIES = (
     "decision_v2",
     "exact_character_ascension",
@@ -50,6 +50,7 @@ REQUIRED_CAPABILITIES = (
     "monster_state_machine_export",
     "unified_trigger_progress",
     "run_analysis",
+    "map_boss_identity",
     "selection_runtime_preview",
 )
 

@@ -16,9 +16,9 @@ internal static class DecisionWindowService
 
     private static Dictionary<string, Dictionary<string, Dictionary<string, object?>>>? _modelDbGameDataIndex;
 
-    internal const int DecisionVersion = 4;
+    internal const int DecisionVersion = 5;
     private const string DefaultProfile = "ai_safe";
-    private const string ModVersion = "0.1.5";
+    private const string ModVersion = "0.1.6";
     private static readonly TimeSpan CombatStableDelay = TimeSpan.FromMilliseconds(500);
     private static readonly object CombatStabilityGate = new();
     private static string? _lastCombatStabilitySignature;
@@ -2615,7 +2615,12 @@ internal static class DecisionWindowService
             {
                 boss_node = map.boss_node,
                 second_boss_node = map.second_boss_node,
-                known_boss_name = (string?)null
+                boss_encounter = map.boss_encounter,
+                second_boss_encounter = map.second_boss_encounter,
+                known_boss_encounter_id = map.boss_encounter?.encounter_id,
+                known_boss_name = map.boss_encounter?.name,
+                known_second_boss_encounter_id = map.second_boss_encounter?.encounter_id,
+                known_second_boss_name = map.second_boss_encounter?.name
             },
             available_nodes = map.available_nodes.Select(node => new
             {
@@ -3177,6 +3182,8 @@ internal static class DecisionWindowService
             run.max_hp,
             run.gold,
             run.max_energy,
+            run.boss_encounter,
+            run.second_boss_encounter,
             deck_size = run.deck.Length,
             deck = run.deck.Select(card => new
             {

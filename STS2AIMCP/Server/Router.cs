@@ -13,7 +13,7 @@ internal static class Router
 {
     private const string ServiceName = "sts2-ai-mcp";
     private const string ProtocolVersion = DecisionWindowService.ProtocolVersion;
-    private const string ModVersion = "0.1.5";
+    private const string ModVersion = "0.1.6";
     private const string LogPrefix = "[STS2AIMCP.Router]";
     private const int DefaultDecisionWaitTimeoutMs = 20_000;
     private const int ActionNextDecisionTimeoutMs = 20_000;
@@ -76,6 +76,7 @@ internal static class Router
                             unified_trigger_progress = true,
                             model_id_search = true,
                             run_analysis = true,
+                            map_boss_identity = true,
                             selection_runtime_preview = true,
                             end_turn_hit_simulation = true,
                             automatic_consumable_simulation = new[] { "FAIRY_IN_A_BOTTLE" },
