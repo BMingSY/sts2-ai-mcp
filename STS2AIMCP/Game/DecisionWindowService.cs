@@ -16,13 +16,15 @@ internal static class DecisionWindowService
 
     private static Dictionary<string, Dictionary<string, Dictionary<string, object?>>>? _modelDbGameDataIndex;
 
-    internal const int DecisionVersion = 5;
+    internal const int DecisionVersion = 6;
     private const string DefaultProfile = "ai_safe";
-    private const string ModVersion = "0.1.6";
+    private const string ModVersion = "0.1.7";
     private static readonly TimeSpan CombatStableDelay = TimeSpan.FromMilliseconds(500);
     private static readonly object CombatStabilityGate = new();
+    private static readonly object InFlightDecisionGate = new();
     private static string? _lastCombatStabilitySignature;
     private static DateTime _lastCombatStabilityChangedUtc = DateTime.MinValue;
+    private static string? _inFlightDecisionId;
 
     private static readonly Regex DealDamageRegex = new(
         @"\bDeal\s+(?<amount>\d+)\s+damage",
@@ -59,6 +61,18 @@ internal static class DecisionWindowService
                 reason = reason,
                 screen = state.screen,
                 last_transition = state.screen,
+                raw_state = options.include_raw_state ? state : null
+            };
+        }
+
+        if (IsDecisionInFlight(decision.decision_id))
+        {
+            return new DecisionCurrentPayload
+            {
+                available = false,
+                reason = "action_in_flight",
+                screen = state.screen,
+                last_transition = "action_in_flight",
                 raw_state = options.include_raw_state ? state : null
             };
         }
@@ -152,7 +166,17 @@ internal static class DecisionWindowService
         var actionRequest = BuildActionRequest(choice, request);
         var beforeState = current.raw_state;
         var traceCursor = ActionTraceService.Cursor;
-        var actionResponse = await GameActionService.ExecuteAsync(actionRequest);
+        MarkDecisionInFlight(decision.decision_id);
+        ActionResponsePayload actionResponse;
+        try
+        {
+            actionResponse = await GameActionService.ExecuteAsync(actionRequest);
+        }
+        catch
+        {
+            ReleaseInFlightDecision(decision.decision_id);
+            throw;
+        }
         var actionTrace = ActionTraceService.SnapshotSince(traceCursor);
         DecisionWindowPayload? nextDecision = null;
 
@@ -166,6 +190,7 @@ internal static class DecisionWindowService
             builtNextDecision.decision_id != decision.decision_id)
         {
             nextDecision = builtNextDecision;
+            ReleaseInFlightDecision(decision.decision_id);
         }
 
         return new DecisionActResponsePayload
@@ -5175,6 +5200,46 @@ internal static class DecisionWindowService
         {
             _lastCombatStabilitySignature = null;
             _lastCombatStabilityChangedUtc = DateTime.MinValue;
+        }
+    }
+
+    private static void MarkDecisionInFlight(string decisionId)
+    {
+        lock (InFlightDecisionGate)
+        {
+            _inFlightDecisionId = decisionId;
+        }
+    }
+
+    private static bool IsDecisionInFlight(string decisionId)
+    {
+        lock (InFlightDecisionGate)
+        {
+            if (_inFlightDecisionId == null)
+            {
+                return false;
+            }
+
+            if (string.Equals(_inFlightDecisionId, decisionId, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            // A different decision proves that the accepted action completed its
+            // handoff. Release the lease as the new window becomes visible.
+            _inFlightDecisionId = null;
+            return false;
+        }
+    }
+
+    private static void ReleaseInFlightDecision(string decisionId)
+    {
+        lock (InFlightDecisionGate)
+        {
+            if (string.Equals(_inFlightDecisionId, decisionId, StringComparison.Ordinal))
+            {
+                _inFlightDecisionId = null;
+            }
         }
     }
 

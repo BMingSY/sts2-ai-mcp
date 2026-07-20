@@ -14,6 +14,7 @@ class DummyV2Client:
     def __init__(self) -> None:
         self.search_calls: list[dict] = []
         self.list_id_calls: list[dict] = []
+        self.take_calls: list[dict] = []
         self.current_decision = {
             "available": True,
             "decision": {
@@ -42,6 +43,7 @@ class DummyV2Client:
         return self.current_decision
 
     def take_action(self, **kwargs) -> dict:
+        self.take_calls.append(kwargs)
         return {
             "action_id": kwargs["action_id"],
             "status": "completed",
@@ -95,6 +97,30 @@ class VersionedDataClient(DummyV2Client):
                 "context": {"combat": {"hand": [{"card_id": "BASH"}]}},
             },
         }
+
+
+class PendingActionClient(DummyV2Client):
+    def __init__(self) -> None:
+        super().__init__()
+        self.wait_calls: list[dict] = []
+        self.next_decision = {
+            **self.current_decision["decision"],
+            "decision_id": "run:f1:combat:t2:def456",
+            "summary": {"floor": 1, "current_hp": 44, "max_hp": 70},
+        }
+
+    def take_action(self, **kwargs) -> dict:
+        return {
+            "action_id": kwargs["action_id"],
+            "status": "pending",
+            "stable": False,
+            "previous_decision_id": kwargs["decision_id"],
+            "next_decision": None,
+        }
+
+    def wait_for_decision(self, **kwargs) -> dict:
+        self.wait_calls.append(kwargs)
+        return {"available": True, "decision": self.next_decision}
 
 
 def _choice(action_id: str, kind: str, **source: object) -> dict:
@@ -152,6 +178,8 @@ class V2ProfileTests(unittest.TestCase):
                 "wait_for_decision",
                 "preview_action",
                 "preview_action_plan",
+                "run_evaluator",
+                "combat_horizon",
                 "take_action",
                 "get_action_trace",
                 "execute_action_plan",
@@ -176,6 +204,8 @@ class V2ProfileTests(unittest.TestCase):
                 "wait_for_decision",
                 "preview_action",
                 "preview_action_plan",
+                "run_evaluator",
+                "combat_horizon",
                 "take_action",
                 "get_action_trace",
                 "execute_action_plan",
@@ -205,6 +235,56 @@ class V2ProfileTests(unittest.TestCase):
         self.assertEqual(client.search_calls[-1]["collections"], ["monsters", "encounters"])
         self.assertEqual(ids_result["collection"], "enchantments")
         self.assertEqual(client.list_id_calls[-1]["query"], "ad")
+
+    def test_reasoning_tools_use_cached_decision_without_actions(self) -> None:
+        client = DummyV2Client()
+        client.current_decision["decision"] = {
+            **client.current_decision["decision"],
+            "summary": {
+                "floor": 1,
+                "current_hp": 10,
+                "max_hp": 70,
+                "block": 0,
+                "energy": 1,
+                "cards_played_this_turn": 0,
+            },
+            "context": {
+                "run": {
+                    "deck": [
+                        {"card_id": "DEFEND", "card_type": "Skill", "keywords": ["Block"]}
+                    ]
+                },
+                "combat": {
+                    "cards_played_this_turn": 0,
+                    "player": {
+                        "current_hp": 10,
+                        "block": 0,
+                        "energy": 1,
+                        "stars": 0,
+                        "powers": [],
+                    },
+                    "hand": [],
+                    "enemies": [],
+                },
+            },
+        }
+        server = create_server(client=client, tool_profile="ai_safe_v2")
+        current_tool = asyncio.run(server.get_tool("get_current_decision"))
+        run_tool = asyncio.run(server.get_tool("run_evaluator"))
+        combat_tool = asyncio.run(server.get_tool("combat_horizon"))
+
+        current_tool.fn()
+        run_result = run_tool.fn(decision_id="run:f1:combat:t1:abc123")
+        combat_result = combat_tool.fn(
+            decision_id="run:f1:combat:t1:abc123",
+            lines=[{"label": "invalid but read-only", "steps": [{"kind": "play_card"}]}],
+        )
+
+        self.assertEqual(run_result["status"], "complete")
+        self.assertEqual(combat_result["status"], "complete")
+        self.assertFalse(run_result["mutation_performed"])
+        self.assertFalse(combat_result["mutation_performed"])
+        self.assertEqual(client.take_calls, [])
 
     def test_take_action_appends_decision_log(self) -> None:
         client = DummyV2Client()
@@ -239,6 +319,27 @@ class V2ProfileTests(unittest.TestCase):
         self.assertEqual(mcp_row["selected_label"], "End turn")
         self.assertEqual(mcp_row["client_note"], "forced by test")
         self.assertEqual(mcp_row["summary"], {"floor": 1, "current_hp": 50, "max_hp": 70})
+
+    def test_take_action_waits_through_pending_until_next_decision(self) -> None:
+        client = PendingActionClient()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"STS2_AGENT_KNOWLEDGE_DIR": tmpdir}):
+                server = create_server(client=client, tool_profile="ai_safe_v2")
+                get_current = asyncio.run(server.get_tool("get_current_decision"))
+                take_action = asyncio.run(server.get_tool("take_action"))
+
+                get_current.fn()
+                result = take_action.fn(
+                    decision_id="run:f1:combat:t1:abc123",
+                    action_id="combat:end_turn",
+                    client_note="wait for enemy turn",
+                )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["stable"])
+        self.assertEqual(result["next_decision"]["decision_id"], "run:f1:combat:t2:def456")
+        self.assertEqual(len(client.wait_calls), 1)
+        self.assertEqual(client.wait_calls[0]["after_decision_id"], "run:f1:combat:t1:abc123")
 
     def test_take_action_avoids_mixing_old_decision_log_format(self) -> None:
         client = DummyV2Client()

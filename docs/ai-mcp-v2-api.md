@@ -85,7 +85,7 @@ Return the current stable decision if one exists. This endpoint does not wait.
     "available": true,
     "decision": {
       "decision_id": "WJT8A736AV:f33:combat:t6:0007",
-      "decision_version": 5,
+      "decision_version": 6,
       "state_version": 13,
       "protocol_version": "2026-07-18-v2-draft",
       "run_id": "WJT8A736AV",
@@ -229,7 +229,9 @@ If the action was accepted but the next stable decision does not become ready be
 }
 ```
 
-The client should call `wait_for_decision` after a pending timeout. Normal play should not see this unless the game remains in a long transition or the Mod cannot classify the next state.
+The direct Mod HTTP client should call `wait_for_decision` with `after_decision_id` after a pending timeout. While that action is in flight, the accepted decision ID is leased and is not exposed again as a stable current decision. This prevents callers from submitting the same action twice.
+
+The bundled MCP `take_action` tool handles this transport-level timeout internally: it continues waiting in bounded long-poll slices and returns only with a different stable `next_decision`. If its overall handoff deadline expires, it raises `action_transition_timeout` instead of returning a reusable old decision. Normal play should not see either timeout unless the game remains in a long transition or the Mod cannot classify the next state.
 
 `result_delta` is deliberately conservative. It reports stable values visible before and after the action. It does not invent intermediate trigger order; until engine event hooks are available, `trigger_events_complete` remains false.
 
@@ -576,6 +578,8 @@ Recommended MCP behavior:
 | `get_current_decision` | `GET /v2/decision/current` |
 | `preview_action` | `POST /v2/decision/preview` |
 | `preview_action_plan` | MCP-local read-only preflight over the current decision |
+| `run_evaluator` | MCP-local bounded public-deck metrics and candidate deltas |
+| `combat_horizon` | MCP-local bounded checks over model-supplied combat lines |
 | `take_action` | `POST /v2/decision/act` |
 | `get_action_trace` | `GET /v2/trace/actions` |
 | `execute_action_plan` | MCP-local orchestration over successive `POST /v2/decision/act` calls |
@@ -589,6 +593,30 @@ Recommended MCP behavior:
 The MCP profile name should be `ai_safe_v2`.
 
 MCP startup validates the protocol version, minimum state/decision versions, and all required semantic capabilities before serving tools. A mismatched or unreachable Mod fails loudly. `STS2_MCP_ALLOW_INCOMPATIBLE=1` is the only explicit local override; compatibility is never silently assumed.
+
+### Bounded reasoning calculators
+
+`run_evaluator` and `combat_horizon` are MCP-local, read-only calculators. Both
+require a `decision_id` previously cached by `get_current_decision` or
+`wait_for_decision`; they do not make a fallback game request, wait for a decision,
+or call an action endpoint.
+
+`run_evaluator` accepts up to 16 candidate card IDs and up to four natural-access
+horizons. It combines the public unordered `context.run.deck` with the decision's
+public card catalog, returns deck/cost/role metrics, and reports the factual delta
+from adding one candidate copy. Candidates remain in input order. The output contains
+no score, ranking, or recommendation.
+
+`combat_horizon` accepts up to eight model-proposed lines of at most five steps each.
+It runs the existing deterministic plan preview for each line and adds current exposed
+attack-intent arithmetic after direct projected kills. It does not enumerate the hand,
+generate candidate lines, or claim engine-complete survival when previews or intents
+are incomplete.
+
+Both default to 100ms and 512 work states. Requested budgets are clamped to hard
+ceilings of 500ms and 4096 states. Cardinality caps are validated before work starts;
+budget exhaustion returns `status="partial"`, a `stop_reason`, and the completed
+candidate/line prefix. `mutation_performed` is always false.
 
 ### Conditional Action Plans
 

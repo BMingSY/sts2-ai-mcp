@@ -17,6 +17,13 @@ from .client import Sts2ApiError, Sts2CapabilityError, Sts2Client, evaluate_runt
 from .game_data import GameDataSnapshot, GameDataVersionError, VersionedGameDataStore
 from .handoff import Sts2HandoffService
 from .knowledge import Sts2KnowledgeBase
+from .reasoning import (
+    DEFAULT_MAX_STATES,
+    DEFAULT_TIME_BUDGET_MS,
+    ReasoningInputError,
+    evaluate_combat_horizon,
+    evaluate_run_decision,
+)
 
 ToolHandler = Callable[..., dict[str, Any]]
 
@@ -32,6 +39,11 @@ class ActionPlanStep(TypedDict):
     potion_id: NotRequired[str]
     option_index: NotRequired[int]
     note: NotRequired[str]
+
+
+class CombatHorizonLine(TypedDict):
+    label: NotRequired[str]
+    steps: list[ActionPlanStep]
 
 JSON_FILE_EXTENSION = ".json"
 JSON_FILE_EXTENSION_LENGTH = len(JSON_FILE_EXTENSION)
@@ -75,6 +87,8 @@ _PLAN_SELECTOR_KEYS = (
 _MAX_COMBAT_PLAN_STEPS = 5
 _MAX_SELECTION_PLAN_STEPS = 12
 _MAX_CACHED_PLAN_RESULTS = 128
+_DEFAULT_ACTION_HANDOFF_TIMEOUT_SECONDS = 120.0
+_ACTION_HANDOFF_WAIT_SLICE_MS = 20_000
 
 _SCENE_FIELD_SETS: dict[str, dict[str, list[str]]] = {
     SCENE_COMBAT: {
@@ -1656,6 +1670,72 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
             params={},
             client_note=client_note,
         )
+        if result.get("status") == "pending" or result.get("stable") is False:
+            try:
+                timeout_seconds = max(
+                    0.1,
+                    float(
+                        os.getenv(
+                            "STS2_MCP_ACTION_HANDOFF_TIMEOUT_SECONDS",
+                            str(_DEFAULT_ACTION_HANDOFF_TIMEOUT_SECONDS),
+                        )
+                    ),
+                )
+            except ValueError:
+                timeout_seconds = _DEFAULT_ACTION_HANDOFF_TIMEOUT_SECONDS
+
+            deadline = time.monotonic() + timeout_seconds
+            last_error: Sts2ApiError | None = None
+            while time.monotonic() < deadline:
+                remaining_ms = max(100, int((deadline - time.monotonic()) * 1000))
+                wait_ms = min(_ACTION_HANDOFF_WAIT_SLICE_MS, remaining_ms)
+                try:
+                    payload = _cache_decision(
+                        sts2.wait_for_decision(
+                            timeout_ms=wait_ms,
+                            profile="ai_safe",
+                            include_raw_state=False,
+                            include_relevant_game_data=False,
+                            after_decision_id=decision_id,
+                        ),
+                        include_relevant=False,
+                    )
+                except Sts2ApiError as exc:
+                    if not exc.retryable:
+                        raise
+                    last_error = exc
+                    remaining_seconds = deadline - time.monotonic()
+                    if remaining_seconds > 0:
+                        time.sleep(min(0.25, remaining_seconds))
+                    continue
+
+                next_decision = payload.get("decision")
+                if not isinstance(next_decision, dict):
+                    continue
+                if next_decision.get("decision_id") == decision_id:
+                    continue
+
+                result = {
+                    **result,
+                    "status": "completed",
+                    "stable": True,
+                    "message": "Action completed; next decision is ready.",
+                    "next_decision": next_decision,
+                }
+                break
+            else:
+                raise Sts2ApiError(
+                    status_code=0,
+                    code="action_transition_timeout",
+                    message="Action was accepted, but no new actionable decision became ready before the MCP handoff deadline.",
+                    details={
+                        "previous_decision_id": decision_id,
+                        "timeout_seconds": timeout_seconds,
+                        "last_error": str(last_error) if last_error is not None else None,
+                    },
+                    retryable=True,
+                )
+
         _cache_next_decision(result)
         logging_result = _append_decision_log(
             decision=decision,
@@ -1979,6 +2059,8 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
                     "get_current_decision",
                     "preview_action",
                     "preview_action_plan",
+                    "run_evaluator",
+                    "combat_horizon",
                     "take_action",
                     "get_action_trace",
                     "execute_action_plan",
@@ -2053,6 +2135,92 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
                     "stop_reason": "starting_decision_is_not_current",
                 }
             return _preview_combat_action_plan(decision, steps, mode)
+
+        @mcp.tool
+        def run_evaluator(
+            decision_id: str,
+            candidate_card_ids: list[str] | None = None,
+            horizons: list[int] | None = None,
+            time_budget_ms: int = DEFAULT_TIME_BUDGET_MS,
+            max_states: int = DEFAULT_MAX_STATES,
+        ) -> dict[str, Any]:
+            """Calculate public deck facts and before/after candidate deltas without choosing a card.
+
+            This tool reads only a decision already cached by get_current_decision or
+            wait_for_decision. It performs no game request and no action. Results keep
+            candidate input order and are bounded by a 500ms/4096-state hard ceiling;
+            exhausted budgets return a structured partial result.
+            """
+            decision = decision_cache.get(decision_id)
+            if decision is None:
+                return {
+                    "schema_version": 1,
+                    "tool": "run_evaluator",
+                    "status": "rejected",
+                    "stop_reason": "decision_not_cached",
+                    "mutation_performed": False,
+                    "hint": "Call get_current_decision or wait_for_decision first and reuse its decision_id.",
+                }
+            try:
+                return evaluate_run_decision(
+                    decision,
+                    candidate_card_ids=candidate_card_ids or [],
+                    horizons=horizons or [5, 10, 15],
+                    time_budget_ms=time_budget_ms,
+                    max_states=max_states,
+                )
+            except ReasoningInputError as exc:
+                return {
+                    "schema_version": 1,
+                    "tool": "run_evaluator",
+                    "status": "rejected",
+                    "stop_reason": "invalid_input",
+                    "mutation_performed": False,
+                    "error": str(exc),
+                }
+
+        @mcp.tool
+        def combat_horizon(
+            decision_id: str,
+            lines: list[CombatHorizonLine],
+            time_budget_ms: int = DEFAULT_TIME_BUDGET_MS,
+            max_states: int = DEFAULT_MAX_STATES,
+        ) -> dict[str, Any]:
+            """Check supplied combat lines and current-intent survival without executing or ranking them.
+
+            The calling model supplies up to eight candidate lines of at most five
+            steps. This tool reuses the deterministic action-plan preview, adds
+            current exposed-intent arithmetic after projected direct kills, and
+            returns lines in input order. It never searches for lines, contacts the
+            game, or performs an action. Work is hard-capped at 500ms/4096 states.
+            """
+            decision = decision_cache.get(decision_id)
+            if decision is None:
+                return {
+                    "schema_version": 1,
+                    "tool": "combat_horizon",
+                    "status": "rejected",
+                    "stop_reason": "decision_not_cached",
+                    "mutation_performed": False,
+                    "hint": "Call get_current_decision or wait_for_decision first and reuse its decision_id.",
+                }
+            try:
+                return evaluate_combat_horizon(
+                    decision,
+                    lines=lines,
+                    previewer=_preview_combat_action_plan,
+                    time_budget_ms=time_budget_ms,
+                    max_states=max_states,
+                )
+            except ReasoningInputError as exc:
+                return {
+                    "schema_version": 1,
+                    "tool": "combat_horizon",
+                    "status": "rejected",
+                    "stop_reason": "invalid_input",
+                    "mutation_performed": False,
+                    "error": str(exc),
+                }
 
         @mcp.tool
         def get_action_trace(after_sequence: int = 0) -> dict[str, Any]:

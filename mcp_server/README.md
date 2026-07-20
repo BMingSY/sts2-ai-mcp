@@ -7,9 +7,15 @@ The default tool profile is `ai_safe_v2`. It exposes only the v2 decision-window
 - `health_check`
 - `wait_for_decision`
 - `get_current_decision`
+- `preview_action`
+- `preview_action_plan`
+- `run_evaluator`
+- `combat_horizon`
 - `take_action`
+- `get_action_trace`
 - `execute_action_plan`
 - `select_cards`
+- `select_character`
 - `lookup_game_data`
 - `append_decision_note`
 
@@ -41,6 +47,30 @@ python3 ../scripts/sync-game-data.py
 ```
 
 Use `STS2_GAME_DATA_DIR` to override the snapshot root. Generated game data is not checked in by default.
+
+## Read-only reasoning helpers
+
+`run_evaluator(decision_id, candidate_card_ids, horizons)` calculates public deck
+shape, exact without-replacement access probabilities, and one-copy candidate deltas.
+It preserves candidate input order and does not rank or choose cards.
+
+`combat_horizon(decision_id, lines)` checks up to eight model-proposed combat lines
+of at most five steps using the deterministic plan preview, then calculates the
+current exposed attack-intent outcome after projected direct kills. It does not
+search for lines or execute them.
+
+Both tools require a decision already cached by `get_current_decision` or
+`wait_for_decision`, so calculator calls perform no game/network wait. Their default
+work budget is 100ms; the non-configurable hard ceiling is 500ms and 4096 states.
+Budget exhaustion returns `status: "partial"` with the completed prefix.
+
+The same calculators are available as an offline JSON CLI that never connects to
+the game:
+
+```bash
+uv run sts2-reasoning --json run-evaluator --input run-request.json
+uv run sts2-reasoning --json combat-horizon --input combat-request.json
+```
 
 ## Tests
 

@@ -130,17 +130,20 @@ internal static class GameActionService
                 screen
             }, retryable: true);
 
-        var playerCombatState = me.Creature.CombatState
-            ?? throw new ApiException(503, "state_unavailable", "Combat state is unavailable.", new
+        var playerCombatState = me.PlayerCombatState
+            ?? throw new ApiException(503, "state_unavailable", "Player combat state is unavailable.", new
             {
                 action = "end_turn",
                 screen
             }, retryable: true);
 
-        var roundNumber = playerCombatState.RoundNumber;
-        RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(new EndPlayerTurnAction(me, roundNumber));
+        // Match NEndTurnButton.CallReleaseLogic exactly. EndPlayerTurnAction validates
+        // this value against PlayerCombatState.TurnNumber, which can advance
+        // independently from CombatState.RoundNumber when an effect grants an extra turn.
+        var turnNumber = playerCombatState.TurnNumber;
+        RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(new EndPlayerTurnAction(me, turnNumber));
 
-        var stable = await WaitForEndTurnTransitionAsync(roundNumber, TimeSpan.FromSeconds(5));
+        var stable = await WaitForEndTurnTransitionAsync(turnNumber, TimeSpan.FromSeconds(5));
 
         return new ActionResponsePayload
         {
@@ -152,7 +155,7 @@ internal static class GameActionService
         };
     }
 
-    private static async Task<bool> WaitForEndTurnTransitionAsync(int previousRound, TimeSpan timeout)
+    private static async Task<bool> WaitForEndTurnTransitionAsync(int previousTurn, TimeSpan timeout)
     {
         if (NGame.Instance == null)
         {
@@ -165,16 +168,16 @@ internal static class GameActionService
         {
             await NGame.Instance.ToSignal(NGame.Instance.GetTree(), SceneTree.SignalName.ProcessFrame);
 
-            if (IsEndTurnStable(previousRound))
+            if (IsEndTurnStable(previousTurn))
             {
                 return true;
             }
         }
 
-        return IsEndTurnStable(previousRound);
+        return IsEndTurnStable(previousTurn);
     }
 
-    private static bool IsEndTurnStable(int previousRound)
+    private static bool IsEndTurnStable(int previousTurn)
     {
         if (!CombatManager.Instance.IsInProgress)
         {
@@ -187,7 +190,13 @@ internal static class GameActionService
             return true;
         }
 
-        if (combatState.RoundNumber != previousRound)
+        var me = LocalContext.GetMe(combatState);
+        if (me?.PlayerCombatState == null)
+        {
+            return true;
+        }
+
+        if (me.PlayerCombatState.TurnNumber != previousTurn)
         {
             return true;
         }

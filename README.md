@@ -34,6 +34,8 @@ Normal MCP play should use only:
 - `get_current_decision`
 - `preview_action`
 - `preview_action_plan`
+- `run_evaluator`
+- `combat_horizon`
 - `take_action`
 - `get_action_trace`
 - `execute_action_plan`
@@ -132,10 +134,16 @@ The game and matching Mod must be reachable before MCP startup. Startup enforces
 On the character-select screen, the preferred `ai_safe_v2`, guided, and full action is a single call with both values: `select_character(character_id="IRONCLAD", ascension=10)`. The Mod validates the exact level against the currently unlocked range; callers no longer need to select a character and then issue repeated ascension increments.
 
 The AI-safe v2 MCP also exposes `preview_action(decision_id, action_id)`, read-only
-`preview_action_plan(decision_id, steps)`, and `get_action_trace(after_sequence)`.
+`preview_action_plan(decision_id, steps)`, `run_evaluator`, `combat_horizon`, and
+`get_action_trace(after_sequence)`.
 Plan preview checks a deterministic combat prefix against the current energy, stars,
 known card-play limits, stable references, and sequential direct damage/Block without
-mutating the game. Monster lookups carry the generated engine move state machine,
+mutating the game. `run_evaluator` reports public deck metrics and visible-candidate
+before/after deltas; `combat_horizon` checks several model-proposed lines under the
+same preview semantics and adds current-intent survival arithmetic. Neither tool
+chooses or executes an action. Both use cached decisions only, default to a 100ms
+work budget, have a 500ms hard ceiling, and return structured partial results when a
+work limit is reached. Monster lookups carry the generated engine move state machine,
 while relics and powers expose the same structured `trigger_progress` schema.
 
 Every run-backed decision now includes factual `context.run_analysis` deck-shape,
