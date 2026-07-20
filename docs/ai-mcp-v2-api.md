@@ -633,9 +633,7 @@ endpoint and declares `transactional_engine_dry_run=false`.
 Agents should prefer a strict plan over repeated single actions when they have already
 evaluated a deterministic 2-5 step combat line and none of the planned cards draw,
 generate, return, transform, or randomly discard cards. Information-revealing plays
-and unresolved tactical branches should remain single-step. The manual driver accepts
-`batch ACTION_ID ACTION_ID ... | note` and converts current choices to stable-reference
-plan steps.
+and unresolved tactical branches should remain single-step.
 
 ```json
 {

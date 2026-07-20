@@ -11,6 +11,7 @@ The release ZIP contains only the game-side mod:
 - `release-metadata.json`
 
 The MCP server is installed from the repository separately.
+The repository tag also contains the maintained `docs/skills/sts2-player/` Codex skill; it is source content and is not duplicated inside the game-side ZIP.
 
 ## Build A ZIP
 
@@ -48,6 +49,8 @@ Before publishing a GitHub Release:
 - verify `http://127.0.0.1:8080/health`
 - verify `/state`, `/v2/decision/current`, and `/v2/data/lookup`
 - run MCP server tests
+- validate `docs/skills/sts2-player/` with the Codex skill validator
+- verify packaged metadata reports the current protocol, state, and decision versions
 - name the tag `v<mod-version>` unless the release needs a compatibility suffix
 - include the tested Slay the Spire 2 version in the release notes
 

@@ -155,7 +155,9 @@ The MCP server is distributed separately from the GitHub repository.
 
 Tested game version: $gameVersion
 Expected Godot/MegaDot version: 4.5.1.m.12
-V2 protocol version: 2026-07-04-v2-draft
+V2 protocol version: 2026-07-18-v2-draft
+State version: 13
+Decision version: 6
 
 Manual install:
 
@@ -173,7 +175,9 @@ $metadata = [ordered]@{
     service = "sts2-ai-mcp"
     mod_id = $modName
     mod_version = $modVersion
-    v2_protocol_version = "2026-07-04-v2-draft"
+    v2_protocol_version = "2026-07-18-v2-draft"
+    state_version = 13
+    decision_version = 6
     tested_game_version = $gameVersion
     expected_godot_version = "4.5.1.m.12"
     packaged_at_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")

@@ -20,6 +20,7 @@ The default tool profile is `ai_safe_v2`. It exposes only the v2 decision-window
 - `append_decision_note`
 
 Legacy profiles still exist in code for migration/testing, but normal AI play should use `ai_safe_v2`.
+Screen-specific actions such as `continue_run` are returned as current decision choices and executed through `take_action`; the compact v2 profile does not expose a separate tool for every game action.
 
 ## Run
 
@@ -28,11 +29,19 @@ uv sync
 uv run sts2-mcp-server
 ```
 
+The stdio server may be started before the game. It keeps the MCP transport
+available while the Mod API is unreachable and becomes usable when the game is
+launched. A reachable but incompatible Mod contract still fails closed. This
+allows MCP clients such as Codex to own the server lifecycle without a separate
+network server or terminal driver.
+
 Network MCP:
 
 ```bash
 uv run sts2-network-mcp-server --host 127.0.0.1 --port 8765 --path /mcp
 ```
+
+Unlike the client-owned stdio transport, network MCP startup expects the Mod API to be reachable.
 
 ## Game Data
 

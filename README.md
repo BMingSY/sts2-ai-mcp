@@ -9,9 +9,9 @@ This repository is the v2-focused successor to the older STS2-Agent fork. The go
 - `STS2AIMCP/`: the in-game mod HTTP API.
 - `mcp_server/`: FastMCP wrapper with `ai_safe_v2` as the default profile.
 - `scripts/`: build and MCP startup helpers.
-- `docs/`: v2 protocol, compatibility, and build notes.
+- `docs/`: v2 protocol, compatibility, build notes, and the repository-maintained `sts2-player` Codex skill.
 
-Private gameplay knowledge is intentionally not part of this repository. Runtime logs and local strategy notes should live under `agent_knowledge/`, `run_logs/`, or an external path such as `~/.local/share/sts2-ai-mcp/knowledge`.
+Reusable gameplay guidance required by `sts2-player` is versioned under `docs/skills/sts2-player/`. Run-specific logs and private local notes should still live under ignored paths such as `agent_knowledge/`, `run_logs/`, or an external path such as `~/.local/share/sts2-ai-mcp/knowledge`.
 
 ## Current Status
 
@@ -129,7 +129,7 @@ HTTP MCP:
 ./scripts/start-mcp-network.sh --host 127.0.0.1 --port 8765 --path /mcp
 ```
 
-The game and matching Mod must be reachable before MCP startup. Startup enforces the v2 protocol/state/decision capability contract and exits on an old or mismatched Mod; use `STS2_MCP_ALLOW_INCOMPATIBLE=1` only for an explicit local compatibility experiment.
+The stdio MCP server may start before the game. It keeps the client-owned transport available while the Mod API is unreachable and becomes usable after the game starts, so normal Codex play does not need a separately managed network server or terminal driver. A reachable but incompatible Mod still fails the v2 protocol/state/decision capability contract. The network MCP startup continues to require a reachable Mod API. Use `STS2_MCP_ALLOW_INCOMPATIBLE=1` only for an explicit local compatibility experiment.
 
 On the character-select screen, the preferred `ai_safe_v2`, guided, and full action is a single call with both values: `select_character(character_id="IRONCLAD", ascension=10)`. The Mod validates the exact level against the currently unlocked range; callers no longer need to select a character and then issue repeated ascension increments.
 
@@ -164,6 +164,19 @@ Static card, monster, encounter, enchantment, power, relic, potion, and event me
 ```bash
 python3 scripts/sync-game-data.py
 ```
+
+## Repository-Maintained Codex Skill
+
+The complete `sts2-player` skill lives under [`docs/skills/sts2-player/`](docs/skills/sts2-player/). It includes the direct MCP workflow, NOSL A10 strategy references, encounter/retrospective notes, UI metadata, and the bounded autoplay harness.
+
+To install or refresh the personal Codex copy:
+
+```bash
+mkdir -p ~/.codex/skills/sts2-player
+rsync -a docs/skills/sts2-player/ ~/.codex/skills/sts2-player/
+```
+
+Treat the repository copy as the maintained source and exclude generated `__pycache__` files.
 
 ## Validation
 

@@ -28,7 +28,7 @@ The mod health response should expose enough data for MCP clients to decide whet
 ```json
 {
   "service": "sts2-ai-mcp",
-  "mod_version": "0.1.7",
+  "mod_version": "0.1.8",
   "v2_protocol_version": "2026-07-18-v2-draft",
   "state_version": 13,
   "decision_version": 6,
@@ -54,7 +54,7 @@ Status meanings:
 
 AI-safe clients should refuse normal `take_action` calls when status is `incompatible`, and should surface a warning when status is `untested`.
 
-The bundled MCP now performs a strict startup contract check for protocol `2026-07-18-v2-draft`, state version 13, decision version 6, and its required capability flags. It exits instead of serving an older contract silently. An explicit `STS2_MCP_ALLOW_INCOMPATIBLE=1` override is available only for local compatibility experiments.
+The bundled MCP performs a strict startup contract check for protocol `2026-07-18-v2-draft`, state version 13, decision version 6, and its required capability flags. Client-owned stdio startup may defer the check while the Mod API is unreachable, but it still exits instead of serving a reachable older contract silently. An explicit `STS2_MCP_ALLOW_INCOMPATIBLE=1` override is available only for local compatibility experiments.
 
 ## Game Data
 

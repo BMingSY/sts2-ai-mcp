@@ -1,0 +1,4 @@
+interface:
+  display_name: "STS2 Player"
+  short_description: "Play STS2 via v2 MCP decisions"
+  default_prompt: "Use $sts2-player to start the STS2 environment if needed, continue the run through ai_safe_v2 MCP decisions, and stop on blockers."

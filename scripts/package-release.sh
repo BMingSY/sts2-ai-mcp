@@ -176,7 +176,9 @@ The MCP server is distributed separately from the GitHub repository.
 
 Tested game version: $game_version
 Expected Godot/MegaDot version: 4.5.1.m.12
-V2 protocol version: 2026-07-04-v2-draft
+V2 protocol version: 2026-07-18-v2-draft
+State version: 13
+Decision version: 6
 
 Manual install:
 
@@ -198,7 +200,9 @@ metadata = {
     "service": "sts2-ai-mcp",
     "mod_id": "STS2AIMCP",
     "mod_version": mod_version,
-    "v2_protocol_version": "2026-07-04-v2-draft",
+    "v2_protocol_version": "2026-07-18-v2-draft",
+    "state_version": 13,
+    "decision_version": 6,
     "tested_game_version": game_version,
     "expected_godot_version": "4.5.1.m.12",
     "packaged_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),

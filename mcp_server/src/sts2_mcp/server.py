@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -24,6 +25,8 @@ from .reasoning import (
     evaluate_combat_horizon,
     evaluate_run_decision,
 )
+
+logger = logging.getLogger("sts2_mcp")
 
 ToolHandler = Callable[..., dict[str, Any]]
 
@@ -261,10 +264,34 @@ def _debug_tools_enabled() -> bool:
     return _env_flag("STS2_ENABLE_DEBUG_ACTIONS")
 
 
-def enforce_startup_contract(client: Sts2Client) -> dict[str, Any]:
+def enforce_startup_contract(
+    client: Sts2Client,
+    *,
+    allow_unreachable: bool = False,
+) -> dict[str, Any]:
     try:
         return client.require_runtime_contract()
-    except (Sts2ApiError, Sts2CapabilityError) as exc:
+    except Sts2ApiError as exc:
+        if allow_unreachable and exc.code == "connection_error" and exc.retryable:
+            logger.warning(
+                "Starting while the STS2 Mod API is unreachable; "
+                "the stdio MCP transport will remain available: %s",
+                exc,
+            )
+            return {
+                "compatible": False,
+                "deferred": True,
+                "error": str(exc),
+            }
+        if _env_flag("STS2_MCP_ALLOW_INCOMPATIBLE"):
+            logger.warning("Starting with explicit incompatible-contract override: %s", exc)
+            return {
+                "compatible": False,
+                "override": True,
+                "error": str(exc),
+            }
+        raise RuntimeError(f"STS2 MCP startup contract check failed: {exc}") from exc
+    except Sts2CapabilityError as exc:
         if _env_flag("STS2_MCP_ALLOW_INCOMPATIBLE"):
             logger.warning("Starting with explicit incompatible-contract override: %s", exc)
             return {
@@ -2672,7 +2699,11 @@ def create_server(client: Sts2Client | None = None, tool_profile: str | None = N
 
 def main() -> None:
     client = Sts2Client()
-    enforce_startup_contract(client)
+    # Codex starts stdio MCP servers when a session opens, which can happen before
+    # the game. Keep the transport alive in that expected state so the same direct
+    # MCP connection becomes usable as soon as the Mod API starts. A reachable but
+    # incompatible Mod still fails closed.
+    enforce_startup_contract(client, allow_unreachable=True)
     create_server(client=client).run(transport="stdio", show_banner=False)
 
 

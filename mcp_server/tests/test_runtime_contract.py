@@ -8,10 +8,12 @@ from sts2_mcp.client import (
     MIN_STATE_VERSION,
     REQUIRED_CAPABILITIES,
     REQUIRED_PROTOCOL_VERSION,
+    Sts2ApiError,
     Sts2CapabilityError,
     Sts2Client,
     evaluate_runtime_contract,
 )
+from sts2_mcp.server import enforce_startup_contract
 
 
 def compatible_health() -> dict:
@@ -40,6 +42,45 @@ class RuntimeContractTests(unittest.TestCase):
                 client.require_runtime_contract()
 
         self.assertIn("capability:action_trace", raised.exception.missing)
+
+    def test_stdio_startup_can_defer_when_game_is_not_running(self) -> None:
+        client = Sts2Client()
+        unavailable = Sts2ApiError(
+            status_code=0,
+            code="connection_error",
+            message="game is not running",
+            retryable=True,
+        )
+
+        with patch.object(client, "require_runtime_contract", side_effect=unavailable):
+            result = enforce_startup_contract(client, allow_unreachable=True)
+
+        self.assertFalse(result["compatible"])
+        self.assertTrue(result["deferred"])
+
+    def test_default_startup_still_rejects_an_unreachable_game(self) -> None:
+        client = Sts2Client()
+        unavailable = Sts2ApiError(
+            status_code=0,
+            code="connection_error",
+            message="game is not running",
+            retryable=True,
+        )
+
+        with patch.object(client, "require_runtime_contract", side_effect=unavailable):
+            with self.assertRaisesRegex(RuntimeError, "startup contract check failed"):
+                enforce_startup_contract(client)
+
+    def test_deferred_startup_does_not_hide_an_incompatible_mod(self) -> None:
+        client = Sts2Client()
+        incompatible = Sts2CapabilityError(
+            missing=["capability:decision_v2"],
+            health=compatible_health(),
+        )
+
+        with patch.object(client, "require_runtime_contract", side_effect=incompatible):
+            with self.assertRaisesRegex(RuntimeError, "startup contract check failed"):
+                enforce_startup_contract(client, allow_unreachable=True)
 
     def test_boss_identity_is_a_required_runtime_capability(self) -> None:
         health = compatible_health()
