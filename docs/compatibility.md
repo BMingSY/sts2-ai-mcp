@@ -28,7 +28,7 @@ The mod health response should expose enough data for MCP clients to decide whet
 ```json
 {
   "service": "sts2-ai-mcp",
-  "mod_version": "0.1.8",
+  "mod_version": "0.1.9",
   "v2_protocol_version": "2026-07-18-v2-draft",
   "state_version": 13,
   "decision_version": 6,

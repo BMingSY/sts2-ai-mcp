@@ -3,7 +3,7 @@
 本文件是用户要求 Codex 游玩战士 A10 时的默认策略。目标只有一个：在不存读档重试的前提下，击败第三层连续两个 Boss 并取得真实胜利结算。
 
 > 最近审阅：2026-07-23
-> 验证基线：游戏 v0.107.1；Mod 0.1.8；protocol `2026-07-18-v2-draft`；state 13；decision 6。
+> 验证基线：游戏 v0.107.1；Mod 0.1.9；protocol `2026-07-18-v2-draft`；state 13；decision 6。
 > 所有数值、机制和卡牌文本以当局 live state 与 `lookup_game_data` 为准。
 
 ## 证据权重

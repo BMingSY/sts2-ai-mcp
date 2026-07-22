@@ -13,7 +13,7 @@ internal static class Router
 {
     private const string ServiceName = "sts2-ai-mcp";
     private const string ProtocolVersion = DecisionWindowService.ProtocolVersion;
-    private const string ModVersion = "0.1.8";
+    private const string ModVersion = "0.1.9";
     private const string LogPrefix = "[STS2AIMCP.Router]";
     private const int DefaultDecisionWaitTimeoutMs = 20_000;
     private const int ActionNextDecisionTimeoutMs = 20_000;
