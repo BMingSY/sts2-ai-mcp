@@ -4115,6 +4115,7 @@ internal static class GameStateService
         var validTargetIndices = GetCardTargetIndices(combatState, card);
         var rawRulesText = GetCardRulesText(card);
         var dynamicVars = BuildCardDynamicVarPayloads(card);
+        var targetDynamicVars = BuildCardTargetDynamicVarPayloads(combatState, card);
         var resolvedRulesText = GetResolvedCardRulesText(card);
         var rulesText = string.IsNullOrWhiteSpace(resolvedRulesText) ? rawRulesText : resolvedRulesText;
         var mods = GetCardModifierTags(card);
@@ -4142,6 +4143,7 @@ internal static class GameStateService
             raw_rules_text = rawRulesText,
             resolved_rules_text = resolvedRulesText,
             dynamic_vars = dynamicVars,
+            target_dynamic_vars = targetDynamicVars,
             keywords = keywords,
             mods = mods,
             modifier_details = BuildCardModifierPayloads(card),
@@ -4158,8 +4160,6 @@ internal static class GameStateService
 
     private static Dictionary<string, CombatCardDynamicVarPayload> BuildCardDynamicVarPayloads(CardModel card)
     {
-        var result = new Dictionary<string, CombatCardDynamicVarPayload>(StringComparer.OrdinalIgnoreCase);
-
         try
         {
             // PreviewValue is the game-supported display value after player/global hooks such
@@ -4172,6 +4172,60 @@ internal static class GameStateService
             // Base and enchanted values remain useful during short transition windows where the
             // game cannot calculate a full preview yet.
         }
+
+        return SnapshotCardDynamicVarPayloads(card);
+    }
+
+    private static Dictionary<int, Dictionary<string, CombatCardDynamicVarPayload>> BuildCardTargetDynamicVarPayloads(
+        CombatState combatState,
+        CardModel card)
+    {
+        var result = new Dictionary<int, Dictionary<string, CombatCardDynamicVarPayload>>();
+
+        try
+        {
+            foreach (var entry in combatState.Enemies.Select((enemy, index) => new { enemy, index }))
+            {
+                if (!entry.enemy.IsAlive || !entry.enemy.IsHittable)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    // This is the same target-aware preview path used by the game's card UI. It
+                    // evaluates CalculatedDamageVar multipliers and the complete global damage
+                    // hook chain, including target powers and relics such as Paper Phrog and Pen Nib.
+                    card.UpdateDynamicVarPreview(CardPreviewMode.Normal, entry.enemy, card.DynamicVars);
+                    result[entry.index] = SnapshotCardDynamicVarPayloads(card);
+                }
+                catch
+                {
+                    // Keep other target previews available if one creature is in a transient state.
+                }
+            }
+        }
+        catch
+        {
+        }
+        finally
+        {
+            try
+            {
+                // Do not leave the shared card model displaying the last enemy's preview.
+                card.UpdateDynamicVarPreview(CardPreviewMode.Normal, null, card.DynamicVars);
+            }
+            catch
+            {
+            }
+        }
+
+        return result;
+    }
+
+    private static Dictionary<string, CombatCardDynamicVarPayload> SnapshotCardDynamicVarPayloads(CardModel card)
+    {
+        var result = new Dictionary<string, CombatCardDynamicVarPayload>(StringComparer.OrdinalIgnoreCase);
 
         try
         {
@@ -6812,6 +6866,9 @@ internal sealed class CombatHandCardPayload
 
     public Dictionary<string, CombatCardDynamicVarPayload> dynamic_vars { get; init; } =
         new(StringComparer.OrdinalIgnoreCase);
+
+    public Dictionary<int, Dictionary<string, CombatCardDynamicVarPayload>> target_dynamic_vars { get; init; } =
+        new();
 
     public string[] keywords { get; init; } = Array.Empty<string>();
 

@@ -1063,7 +1063,13 @@ internal static class DecisionWindowService
             notes.Add("Used the game's live dynamic-variable preview for card damage.");
         }
         var targetResults = damagePerHit.HasValue && damageTargets.Length > 0
-            ? damageTargets.Select(enemy => BuildDamagePreviewForEnemy(enemy, damagePerHit.Value, hitCount)).ToArray()
+            ? damageTargets
+                .Select(enemy => BuildDamagePreviewForEnemy(
+                    card,
+                    enemy,
+                    damagePerHit.Value,
+                    hitCount))
+                .ToArray()
             : Array.Empty<object>();
         var blockVar = ResolveReferencedDynamicVar(card, "Block", "CalculatedBlock");
         var parsedBlockBase = ExtractFirstInt(GainBlockRegex, card.rules_text);
@@ -1086,6 +1092,13 @@ internal static class DecisionWindowService
             ExtractAppliedPowers(card.rules_text),
             BuildPowersAppliedFromCombatDynamicVars(card.dynamic_vars));
         var unmodeledEffects = new List<string>();
+        if (damageTargets.Length > 0 &&
+            (damageVar == null || damageTargets.Any(enemy =>
+                ResolveReferencedTargetDynamicVar(card, enemy.index, "Damage", "CalculatedDamage") == null)))
+        {
+            unmodeledEffects.Add(
+                "The game's target-aware damage preview was unavailable for at least one target; fallback damage may omit target-specific hooks.");
+        }
         var blockEqualsDamage = string.Equals(card.card_id, "FISTICUFFS", StringComparison.OrdinalIgnoreCase) ||
             card.rules_text.Contains("equal to the damage dealt", StringComparison.OrdinalIgnoreCase) ||
             card.rules_text.Contains("等量于所造成伤害的格挡", StringComparison.Ordinal);
@@ -1281,16 +1294,26 @@ internal static class DecisionWindowService
     }
 
     private static object BuildDamagePreviewForEnemy(
+        CombatHandCardPayload card,
         CombatEnemyPayload enemy,
         int damagePerHit,
         int hitCount)
     {
-        var adjustedPerHit = damagePerHit;
         var notes = new List<string>();
-        if (HasPower(enemy.powers, "VULNERABLE", "Vulnerable"))
+        var targetDamageVar = ResolveReferencedTargetDynamicVar(
+            card,
+            enemy.index,
+            "Damage",
+            "CalculatedDamage");
+        var targetPreviewPerHit = DynamicVarInt(targetDamageVar, value => value.preview_value);
+        var adjustedPerHit = targetPreviewPerHit ?? damagePerHit;
+        if (targetPreviewPerHit.HasValue)
         {
-            adjustedPerHit = (int)Math.Floor(adjustedPerHit * 1.5m);
-            notes.Add("Applied target Vulnerable: attack damage is increased by 50%.");
+            notes.Add("Used the game's target-aware dynamic-variable preview, including card calculations and global damage hooks.");
+        }
+        else
+        {
+            notes.Add("Target-aware game preview was unavailable; retained the targetless preview as a conservative fallback.");
         }
 
         var totalDamage = Math.Max(0, adjustedPerHit * Math.Max(1, hitCount));
@@ -1472,12 +1495,30 @@ internal static class DecisionWindowService
         CombatHandCardPayload card,
         params string[] fallbackNames)
     {
-        foreach (Match match in DynamicVarPlaceholderRegex.Matches(card.raw_rules_text ?? string.Empty))
+        return ResolveReferencedDynamicVar(card.raw_rules_text, card.dynamic_vars, fallbackNames);
+    }
+
+    private static CombatCardDynamicVarPayload? ResolveReferencedTargetDynamicVar(
+        CombatHandCardPayload card,
+        int targetIndex,
+        params string[] fallbackNames)
+    {
+        return card.target_dynamic_vars.TryGetValue(targetIndex, out var dynamicVars)
+            ? ResolveReferencedDynamicVar(card.raw_rules_text, dynamicVars, fallbackNames)
+            : null;
+    }
+
+    private static CombatCardDynamicVarPayload? ResolveReferencedDynamicVar(
+        string? rawRulesText,
+        IReadOnlyDictionary<string, CombatCardDynamicVarPayload> dynamicVars,
+        params string[] fallbackNames)
+    {
+        foreach (Match match in DynamicVarPlaceholderRegex.Matches(rawRulesText ?? string.Empty))
         {
             var name = match.Groups["name"].Value;
             if (fallbackNames.Any(fallback =>
                     name.Contains(fallback, StringComparison.OrdinalIgnoreCase)) &&
-                card.dynamic_vars.TryGetValue(name, out var referenced))
+                dynamicVars.TryGetValue(name, out var referenced))
             {
                 return referenced;
             }
@@ -1485,7 +1526,7 @@ internal static class DecisionWindowService
 
         foreach (var name in fallbackNames)
         {
-            if (card.dynamic_vars.TryGetValue(name, out var value))
+            if (dynamicVars.TryGetValue(name, out var value))
             {
                 return value;
             }
